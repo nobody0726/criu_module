@@ -1,0 +1,21 @@
+# ZDTM tests that pass with the kernel-module DUMP path.
+#
+# How this file is used:
+#   tests/ci-zdtm.sh runs each listed test through userspace/criu-shim/criu-shim,
+#   which routes `dump` to our kernel module and `restore` to the real criu.
+#   A test listed here MUST pass, or CI is red.
+#
+# How to add a test:
+#   1. Run it locally three times in a row, all passing.
+#   2. Add one line below, test path relative to criu/test/.
+#   3. Never add a test that is merely "expected to work".
+#
+# THE LINE COUNT OF THIS FILE IS THE A-TRACK PROGRESS DASHBOARD.
+# It is empty until A3 produces the first restorable image set. An empty
+# allowlist is a legitimate pre-A3 state, not a failure -- ci-zdtm.sh reports
+# PASS with a notice in that case.
+#
+# A3 seeds this with (uncomment as each one actually passes):
+#zdtm/static/env00
+#zdtm/static/pid00
+#zdtm/static/caps00

@@ -1,0 +1,23 @@
+# ZDTM tests that pass with the userspace mini-restore path.
+#
+# How this file is used:
+#   tests/ci-zdtm.sh runs each listed test through userspace/mini-restore/restore-shim,
+#   which routes `dump` to the real criu and `restore` to our implementation.
+#   This is the mirror image of ci/zdtm-allowlist.txt.
+#
+# The two allowlists together are why the same 489 ZDTM programs serve as the
+# test suite for both tracks: each track is validated by the mature half of
+# the real criu on the other side. When one test fails on both lists, the
+# problem is in the image format; when it fails on one, the problem is in that
+# track's code.
+#
+# How to add a test: same rule -- three consecutive local passes, one line.
+#
+# THE LINE COUNT OF THIS FILE IS THE B-TRACK PROGRESS DASHBOARD.
+# Empty until B1 lands. B1's completion criteria require at least 3 entries,
+# B2 adds at least 4 more.
+#
+# B1 seeds this with (uncomment as each one actually passes):
+#zdtm/static/env00
+#zdtm/static/pid00
+#zdtm/static/maps00

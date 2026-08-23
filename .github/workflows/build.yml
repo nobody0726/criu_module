@@ -1,0 +1,117 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Matrix build against distro kernel headers. Fast (headers install in
+  # seconds) and catches the majority of API drift.
+  #
+  # 6.1 is a deliberate sentinel: it replaced the VMA linked list with a maple
+  # tree, so vma->vm_next does not exist and this project MUST fail to build.
+  # If 6.1 ever starts passing, someone added a compat shim we did not agree
+  # to -- that is a review discussion, not a silent win.
+  headers:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - series: "5.10"
+            pkg: "linux-headers-5.10.0-28-amd64"
+            repo: "bullseye"
+            expect: pass
+          - series: "5.15"
+            pkg: "linux-headers-generic"
+            repo: "jammy"
+            expect: pass
+          - series: "6.1"
+            pkg: "linux-headers-6.1.0-18-amd64"
+            repo: "bookworm"
+            expect: fail
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libelf-dev \
+            libssl-dev protobuf-c-compiler libprotobuf-c-dev
+
+      - name: Install kernel headers (${{ matrix.series }})
+        run: |
+          set -x
+          if [ "${{ matrix.repo }}" = "jammy" ]; then
+            sudo apt-get install -y "${{ matrix.pkg }}"
+          else
+            # Debian kernel headers for exact point releases Ubuntu does not ship.
+            sudo tee /etc/apt/sources.list.d/debian.list >/dev/null <<EOF
+          deb [trusted=yes] http://deb.debian.org/debian ${{ matrix.repo }} main
+          EOF
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${{ matrix.pkg }}" || true
+          fi
+          ls -d /lib/modules/*/build
+
+      - name: Build module
+        id: build
+        continue-on-error: ${{ matrix.expect == 'fail' }}
+        run: |
+          KDIR=$(ls -d /lib/modules/*/build | grep "${{ matrix.series }}" | head -1)
+          echo "Using KDIR=$KDIR"
+          make -C kernel_module KDIR="$KDIR" \
+            EXTRA_CFLAGS="-Werror -Wall -Wextra -Wno-unused-parameter" 2>&1 | tee build.log
+
+      - name: Assert sentinel actually failed
+        if: matrix.expect == 'fail'
+        run: |
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "::error::Build unexpectedly SUCCEEDED on ${{ matrix.series }}."
+            echo "This project targets 5.10 only. A passing 6.1 build means an"
+            echo "unreviewed compat shim was added. See docs/03-Iteration-Plan.md."
+            exit 1
+          fi
+          echo "Sentinel behaved as expected: ${{ matrix.series }} does not build."
+
+      - name: Sparse (user/kernel pointer confusion)
+        if: matrix.expect == 'pass'
+        run: |
+          sudo apt-get install -y sparse
+          KDIR=$(ls -d /lib/modules/*/build | grep "${{ matrix.series }}" | head -1)
+          make -C kernel_module KDIR="$KDIR" C=2 CF="-D__CHECK_ENDIAN__" 2>&1 \
+            | tee sparse.log
+          # __user/__kernel mixups are the single most dangerous class of bug
+          # in this project: dereferencing a user pointer in kernel context.
+          if grep -E 'warning:.*(incorrect type|different address spaces)' sparse.log; then
+            echo "::error::sparse found address-space violations"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs-${{ matrix.series }}
+          path: |
+            build.log
+            sparse.log
+          if-no-files-found: ignore
+
+  # Userspace side: mini-restore and the criu-shim. Plain userspace C, so this
+  # is cheap and has no kernel dependency at all.
+  userspace:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential protobuf-c-compiler \
+            libprotobuf-c-dev pkg-config
+      - name: Build userspace
+        run: |
+          if [ -d userspace ]; then
+            make -C userspace CFLAGS="-Wall -Wextra -Werror -O2"
+          else
+            echo "userspace/ not created yet (pre-B1); skipping"
+          fi

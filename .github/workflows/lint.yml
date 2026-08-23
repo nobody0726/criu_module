@@ -1,0 +1,92 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checkpatch:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install checkpatch and sparse
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sparse python3 curl
+          curl -sSLo /tmp/checkpatch.pl \
+            https://raw.githubusercontent.com/torvalds/linux/v5.10/scripts/checkpatch.pl
+          curl -sSLo /tmp/spelling.txt \
+            https://raw.githubusercontent.com/torvalds/linux/v5.10/scripts/spelling.txt
+          curl -sSLo /tmp/const_structs.checkpatch \
+            https://raw.githubusercontent.com/torvalds/linux/v5.10/scripts/const_structs.checkpatch
+          chmod +x /tmp/checkpatch.pl
+
+      # checkpatch wants its data files next to it.
+      - name: Run checkpatch on module sources
+        run: |
+          mkdir -p /tmp/cp/scripts
+          cp /tmp/checkpatch.pl /tmp/cp/scripts/
+          cp /tmp/spelling.txt /tmp/cp/scripts/
+          cp /tmp/const_structs.checkpatch /tmp/cp/scripts/
+          fail=0
+          while IFS= read -r f; do
+            echo "::group::checkpatch $f"
+            (cd /tmp/cp && ./scripts/checkpatch.pl --no-tree --strict --terse \
+               --ignore FILE_PATH_CHANGES,GERRIT_CHANGE_ID,COMMIT_LOG_LONG_LINE \
+               -f "$GITHUB_WORKSPACE/$f") || fail=1
+            echo "::endgroup::"
+          done < <(git ls-files 'kernel_module/**/*.c' 'kernel_module/**/*.h')
+          exit $fail
+
+  commit-msg:
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Project rule from criu/CLAUDE.md: AI-assisted commits carry an
+      # Assisted-by tag, and we never forge a Signed-off-by.
+      - name: Check Assisted-by present and Signed-off-by absent
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          fail=0
+          for sha in $(git rev-list "$base".."$head"); do
+            msg=$(git log -1 --format=%B "$sha")
+            if ! grep -qE '^Assisted-by: .+:.+' <<<"$msg"; then
+              echo "::error::$sha missing 'Assisted-by: AGENT:MODEL' tag"
+              fail=1
+            fi
+            if grep -qE '^Signed-off-by:' <<<"$msg"; then
+              echo "::error::$sha has a Signed-off-by tag; we do not add those"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  forbidden-patterns:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # kallsyms_lookup_name is how out-of-tree modules smuggle access to
+      # unexported symbols. Global Constraints forbid it: a missing symbol is
+      # a finding to record, not a lock to pick.
+      - name: Reject kallsyms_lookup_name and friends
+        run: |
+          fail=0
+          if git grep -nE 'kallsyms_lookup_name|kprobe_lookup_name' -- \
+               'kernel_module/**/*.c' 'kernel_module/**/*.h'; then
+            echo "::error::kallsyms_lookup_name is forbidden (see Global Constraints)"
+            fail=1
+          fi
+          if git grep -nE '\bmm->mmap_sem\b' -- 'kernel_module/**'; then
+            echo "::error::mmap_sem was renamed to mmap_lock in 5.8; use mmap_read_lock()"
+            fail=1
+          fi
+          exit $fail
