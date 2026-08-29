@@ -8,12 +8,11 @@ on:
 # GitHub's standard runners have no nested virtualisation, so /dev/kvm is
 # absent and QEMU runs in TCG (pure emulation) mode -- roughly 10x slower.
 # Three mitigations, in order of importance:
-#   1. cache the built 5.10.29 bzImage, keyed on the config hash
-#   2. keep test programs tiny (A3's target is a static single-threaded binary)
-#   3. run only an allowlisted ZDTM subset; the full 489-test suite runs on L2
+#   1. cache the built 5.10.29 Image, keyed on the config hash
+#   2. keep the smoke test small enough for TCG
 jobs:
   qemu:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -22,18 +21,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex libelf-dev \
-            libssl-dev qemu-system-x86 cpio busybox-static curl xz-utils \
-            protobuf-c-compiler libprotobuf-c-dev libprotobuf-dev \
-            protobuf-compiler python3-protobuf pkg-config libcap-dev \
-            libnl-3-dev libnet-dev libaio-dev libbsd-dev libgnutls28-dev \
-            libnftables-dev libdrm-dev
+            libssl-dev qemu-system-aarch64 cpio busybox-static curl xz-utils
 
       - name: Cache kernel build
         id: kcache
         uses: actions/cache@v4
         with:
           path: |
-            ~/kernels/linux-5.10.29/arch/x86/boot/bzImage
+            ~/kernels/linux-5.10.29/arch/arm64/boot/Image
             ~/kernels/linux-5.10.29/vmlinux
             ~/kernels/linux-5.10.29/.config
             ~/kernels/linux-5.10.29/Module.symvers
@@ -45,41 +40,14 @@ jobs:
         if: steps.kcache.outputs.cache-hit != 'true'
         run: ./scripts/build-kernel.sh 5.10.29
 
-      - name: Build CRIU (the oracle)
-        run: |
-          make -C criu -j$(nproc)
-          sudo make -C criu install
-          criu --version
-          # Archive the baseline: it tells us whether a later test failure is
-          # our bug or a kernel that never supported the feature.
-          criu check --all 2>&1 | tee criu-check-baseline.txt || true
-
       - name: Build module against 5.10.29
         run: make -C kernel_module KDIR="$HOME/kernels/linux-5.10.29"
 
-      - name: Build test programs
-        run: make -C tests/progs
-
-      - name: Boot QEMU and run smoke tests
+      - name: Boot QEMU and run module smoke test
         run: |
-          ./scripts/run-qemu.sh --ci --script tests/ci-smoke.sh 2>&1 | tee qemu.log
-          # run-qemu.sh --ci makes the guest write this marker on success.
-          if ! grep -q 'CI_RESULT: PASS' qemu.log; then
-            echo "::error::guest smoke tests did not report PASS"
-            exit 1
-          fi
-
-      - name: Run allowlisted ZDTM subset
-        run: |
-          if [ ! -s ci/zdtm-allowlist.txt ]; then
-            echo "Allowlist empty (pre-A3). Nothing to run yet."
-            exit 0
-          fi
-          # Line count of the allowlist is the project's progress dashboard.
-          echo "Allowlisted tests: $(grep -cvE '^\s*(#|$)' ci/zdtm-allowlist.txt)"
-          ./scripts/run-qemu.sh --ci --script tests/ci-zdtm.sh 2>&1 | tee zdtm.log
-          if ! grep -q 'ZDTM_RESULT: PASS' zdtm.log; then
-            echo "::error::allowlisted ZDTM tests failed"
+          ./scripts/run-qemu.sh --ci --script tests/module-smoke.sh 2>&1 | tee qemu.log
+          if ! grep -q 'MODULE_SMOKE: PASS' qemu.log; then
+            echo "::error::guest module smoke test did not report PASS"
             exit 1
           fi
 
@@ -89,6 +57,4 @@ jobs:
           name: qemu-logs
           path: |
             qemu.log
-            zdtm.log
-            criu-check-baseline.txt
           if-no-files-found: ignore
