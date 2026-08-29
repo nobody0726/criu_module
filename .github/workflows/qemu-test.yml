@@ -45,7 +45,7 @@ jobs:
 
       - name: Boot QEMU and run module smoke test
         run: |
-          ./scripts/run-qemu.sh --ci --script tests/module-smoke.sh 2>&1 | tee qemu.log
+          timeout 120s ./scripts/run-qemu.sh --ci --script tests/module-smoke.sh 2>&1 | tee qemu.log
           if ! grep -q 'MODULE_SMOKE: PASS' qemu.log; then
             echo "::error::guest module smoke test did not report PASS"
             exit 1

@@ -19,6 +19,7 @@ SCRIPT=""
 MEM="${MEM:-2G}"
 CPUS="${CPUS:-2}"
 STATUS_FILE="$PROJECT_DIR/.qemu-guest.status"
+CPU_MODEL="${QEMU_CPU:-cortex-a72}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -89,7 +90,7 @@ if [ -w /dev/kvm ] && [ "$CI" = 0 ]; then
 	QEMU_ARGS+=(-enable-kvm -cpu host)
 	echo ">>> KVM enabled"
 else
-	QEMU_ARGS+=(-accel tcg -cpu max)
+	QEMU_ARGS+=(-accel tcg -cpu "$CPU_MODEL")
 	echo ">>> TCG mode (no KVM) -- expect ~10x slowdown"
 fi
 
