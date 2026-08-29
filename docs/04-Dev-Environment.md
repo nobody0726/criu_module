@@ -9,19 +9,37 @@
 
 ```bash
 brew install lima
-limactl start --name=criu-dev --cpus 4 --memory 8 --disk 60 template://ubuntu-22.04
+limactl start --name=criu-dev --cpus 4 --memory 8 --disk 60 \
+  --mount-type=reverse-sshfs --mount-writable template://ubuntu-22.04
 limactl shell criu-dev
 ```
 
-Apple Silicon 上注意:Lima 默认起 **aarch64** 客户机。本项目是 **x86_64 only**
-(`rt_sigframe` 是 arch-specific),所以要么用 x86_64 客户机(Rosetta/TCG 模拟,慢
-但可用),要么直接用一台 x86_64 云主机。**推荐后者** —— 内核编译在模拟环境下会慢
-到影响心情。
+项目目录必须对 guest 可写,因为外部模块编译会在源码目录生成 `.o`/`.ko`,QEMU
+启动脚本也需要暂存 guest 入口。VZ 驱动下使用 `reverse-sshfs` 可获得这个行为;
+如果实例已经创建,先 `limactl stop criu-dev`,再执行
+`limactl edit -y --mount-type reverse-sshfs --mount-writable criu-dev` 并重新启动。
 
-```bash
-# x86_64 客户机(慢,仅在没有云主机时用)
-limactl start --name=criu-dev --arch x86_64 --cpus 4 --memory 8 template://ubuntu-22.04
-```
+Apple Silicon 上 Lima 默认起 **aarch64** 客户机,而本项目的目标架构就是
+**aarch64 only**(见 [03-Iteration-Plan](03-Iteration-Plan.md) 的 Global
+Constraints)。**所以默认命令就是对的,不需要加 `--arch`,不需要模拟,不需要云主机。**
+
+选 aarch64 而不是 x86_64 的理由记录在
+[05-registers-and-sigframe](principles/05-registers-and-sigframe.md) 第 0 节。
+一句话版本:arch 相关的代码面很窄(只有寄存器与 sigframe 那一块),而 aarch64 的
+寄存器/浮点模型比 x86 的 xsave 体系干净得多,原生速度还是白拿的。
+
+> **不要在 x86_64 上做这个项目的开发。** 不是不能,是镜像不通:本项目产出的镜像
+> 是 `core-aarch64.proto` 格式,而 A 轨的验证器是**同一台机器上的真 criu
+> restore**。跨架构的镜像交换不在范围内(CRIU 自己也不支持)。
+
+### 一个必须先过的门禁:PAC
+
+M4 等 Apple Silicon 芯片支持 PAC(Pointer Authentication)。这会撞上一个具体的
+版本不匹配 —— **`scripts/build-kernel.sh` 必须配 `CONFIG_ARM64_PTR_AUTH=n`**,
+理由见第 3 节。这不是可选项,它决定真 criu 能不能 dump,而真 criu 是整个计划的
+验证器。
+
+[S0](steps/S0-feasibility-spike.md) 的第一个实验就是验证这一条,在 A1 之前。
 
 ## 1. 三层测试环境
 
@@ -29,10 +47,12 @@ limactl start --name=criu-dev --arch x86_64 --cpus 4 --memory 8 template://ubunt
 |---|---|---|---|
 | L1 编译期 | 任意 Linux,只需内核头文件 | 无 | 每次保存。`make` + sparse + checkpatch |
 | L2 虚拟机 | virtme-ng 或 QEMU + 自建 5.10.29 | 重启 10 秒 | 每次 `insmod`。**默认工作环境** |
-| L3 裸机 | 一台可牺牲的 x86_64 机器 | 重装 | 只在性能测量时用 |
+| L3 裸机 | 一台可牺牲的 aarch64 机器(树莓派 4/5 等) | 重装 | 只在性能测量时用 |
 
 **永远不要在 L3 或你的开发机上直接 insmod。** 一个错误的 `vma->vm_next` 解引用
 就是不可恢复的 oops,运气不好会损坏文件系统。
+
+L3 完全可选。在它出现之前,L1 + L2 足以完成 S0 到 B2 的全部工作。
 
 ### L2 首选:virtme-ng
 
@@ -96,10 +116,51 @@ KDIR ?= $(HOME)/kernels/linux-5.10.29
 | `CONFIG_CHECKPOINT_RESTORE=y` | CRIU 需要的 `/proc/*/map_files` 等 |
 | `CONFIG_MEM_SOFT_DIRTY=y` | 增量 dump 需要 |
 | `CONFIG_EXPERT=y` | 上面几项的可见性前置 |
+| **`CONFIG_ARM64_PTR_AUTH=n`** | **必须关。见下面 3.1** |
 
 **`CONFIG_DEBUG_VM` + `CONFIG_PROVE_LOCKING` + `CONFIG_DEBUG_ATOMIC_SLEEP` 这三个
 是本项目的核心安全网。** 它们会把「碰巧没崩」的错误变成明确的 warning。不开这三个
 写 mm 代码,等于闭眼开车。
+
+### 3.1 为什么必须 `CONFIG_ARM64_PTR_AUTH=n`
+
+这是 aarch64 + 5.10 组合下唯一一处真正的硬冲突,而且它打在验证器上。
+
+`criu/criu/arch/aarch64/crtools.c:117-122`(CRIU 4.2.1-414):
+
+```c
+		ret = ptrace(PTRACE_GETREGSET, pid, NT_ARM_PAC_ENABLED_KEYS, &iov);
+		if (ret) {
+			pr_perror("Failed to get authentication key mask for %d", pid);
+			return -1;
+		}
+```
+
+这段在 `getauxval(AT_HWCAP) & HWCAP_PACA` 为真时执行,**失败即致命** —— `return -1`
+一路传回 `save_task_regs()`,dump 直接失败。
+
+而 `NT_ARM_PAC_ENABLED_KEYS`(0x40a)**在 5.10.29 里不存在**。
+`include/uapi/linux/elf.h` 只定义到 `NT_ARM_TAGGED_ADDR_CTRL`(0x409);
+`arch/arm64/kernel/ptrace.c` 注册的 PAC regset 只有 `REGSET_PAC_MASK`、
+`REGSET_PACA_KEYS`、`REGSET_PACG_KEYS`,没有 enabled_keys。
+
+所以在一台 M4 上跑 5.10.29,**如果内核开了 PAC,真 criu 会 dump 失败**,A 轨和
+B 轨同时失去 oracle。
+
+关掉 `CONFIG_ARM64_PTR_AUTH` 后 `HWCAP_PACA` 不置位,`save_pac_keys()` 里那两个
+分支整块跳过。用户态照旧 —— PAC 指令在未启用时是 NOP,Ubuntu 那种带
+`-mbranch-protection` 编译出来的二进制正常运行。
+
+**代价:本项目不覆盖 PAC 密钥的 C/R。** 写进限制列表。按本项目反复使用的判据
+(明确不支持优于静默错误),这是可接受的。
+
+> **这条结论有一半是推理。** 「M4 客户机会置上 `HWCAP_PACA`」取决于 VMM 是否透传
+> PAC 特征,我没有实测。所以它是 [S0](steps/S0-feasibility-spike.md) 的第一个实验,
+> 排在 A1 之前 —— **oracle 不能 dump 的话,后面所有步骤都没有意义。**
+
+GCS(Guard Control Stack)不用管:`criu/criu/arch/aarch64/gcs.c` 的路径由
+`host_supports_gcs()` 和 `task_has_gcs_enabled()` 双重把关,而 GCS 需要 ARMv9.4 +
+内核 6.13+,5.10 里连符号都没有,整条路径是死的。
 
 ## 4. 编译 CRIU 本体(必需 —— 它是你的验证器)
 
@@ -138,16 +199,35 @@ criu check --all   # 允许有 fail,记下来
 
 用 `linux-headers-*` 包而不是完整源码树,几秒装完。
 
+**runner 必须是 arm64**(`runs-on: ubuntu-24.04-arm`)。用 x86 runner 装
+`linux-headers-*` 拿到的是 x86 的头文件,模块会编不过 —— 而这种失败看起来像代码
+错误,不像环境错误,很浪费时间。
+
+GitHub 的 arm64 runner 对公开仓库免费,和 x86 runner 同等待遇。上游 CRIU 自己
+就在用(`.github/workflows/ci.yml:59` 的 `aarch64-test` 跑在 `ubuntu-26.04-arm` 和
+`ubuntu-22.04-arm` 上)。
+
 ### 5.3 `qemu-test.yml` —— PR 与 main,约 20 分钟(缓存命中后 5 分钟)
 
-**关键限制:GitHub Actions 标准 runner 没有嵌套虚拟化,`/dev/kvm` 不可用。**
-所以 QEMU 只能跑 TCG 纯模拟模式,慢约 10 倍。应对:
+**GitHub Actions 标准 runner 没有嵌套虚拟化,`/dev/kvm` 不可用**,所以 QEMU 只能
+跑 TCG 纯模拟。
 
-1. 用 `actions/cache` 缓存编译好的 5.10.29 `bzImage`,key 里带配置文件哈希。
+> **待实测:** 这一条在 x86 runner 上是确认的。arm64 runner 是否同样没有
+> `/dev/kvm` 我没有验证。CI 第一次跑起来时打一行
+> `ls -l /dev/kvm || echo "no kvm"` 就知道了 —— **如果有,是净改善;如果没有,
+> 和现在一样。** 两种情况都不影响方案成立,所以不值得为它阻塞。
+
+应对(与 `/dev/kvm` 是否存在无关):
+
+1. 用 `actions/cache` 缓存编译好的 5.10.29 `Image`,key 里带配置文件哈希。
    只有改了内核配置才重编。
 2. 测试程序极小(A3 的极简目标就是静态链接单线程),TCG 下也是秒级。
 3. 完整 ZDTM 跑不动 —— CI 只跑一个**白名单子集**(`ci/zdtm-allowlist.txt`),
    完整套件在本地 L2 跑。
+
+> **aarch64 的内核镜像叫 `Image`,不叫 `bzImage`。** `arch/arm64/boot/Image`。
+> 脚本里写死 `bzImage` 会得到一个「文件不存在」的错误,而它离真正的原因
+> (抄了 x86 的路径)有几层距离。
 
 白名单机制同时是**进度仪表盘**:每完成一个步骤就往里加测试名。文件行数即进度。
 

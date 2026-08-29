@@ -18,6 +18,7 @@ CI=0
 SCRIPT=""
 MEM="${MEM:-2G}"
 CPUS="${CPUS:-2}"
+STATUS_FILE="$PROJECT_DIR/.qemu-guest.status"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -30,10 +31,10 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-BZIMAGE="$KDIR/arch/x86/boot/bzImage"
+IMAGE="$KDIR/arch/arm64/boot/Image"
 INITRAMFS="$KROOT/initramfs-$VERSION.cpio.gz"
 
-for f in "$BZIMAGE" "$INITRAMFS"; do
+for f in "$IMAGE" "$INITRAMFS"; do
 	if [ ! -f "$f" ]; then
 		echo "missing $f -- run ./scripts/build-kernel.sh $VERSION first" >&2
 		exit 1
@@ -44,8 +45,9 @@ done
 # requested script there, and clean it up on exit so an interactive run later
 # does not silently execute a stale script.
 GUEST_ENTRY="$PROJECT_DIR/guest-script.sh"
-cleanup() { rm -f "$GUEST_ENTRY"; }
+cleanup() { rm -f "$GUEST_ENTRY" "$STATUS_FILE"; }
 trap cleanup EXIT
+rm -f "$GUEST_ENTRY" "$STATUS_FILE"
 
 if [ -n "$SCRIPT" ]; then
 	if [ ! -f "$PROJECT_DIR/$SCRIPT" ]; then
@@ -55,13 +57,17 @@ if [ -n "$SCRIPT" ]; then
 	cat > "$GUEST_ENTRY" <<EOF
 #!/bin/sh
 cd /mnt/host
-exec /bin/sh "$SCRIPT"
+/bin/sh "$SCRIPT"
+rc=\$?
+echo "\$rc" > /mnt/host/.qemu-guest.status
+exit "\$rc"
 EOF
 	chmod +x "$GUEST_ENTRY"
 fi
 
 QEMU_ARGS=(
-	-kernel "$BZIMAGE"
+	-kernel "$IMAGE"
+	-M virt
 	-initrd "$INITRAMFS"
 	-m "$MEM"
 	-smp "$CPUS"
@@ -70,8 +76,12 @@ QEMU_ARGS=(
 	# 9p passthrough: guest sees this repo at /mnt/host, no image rebuild
 	# needed between edits.
 	-virtfs "local,path=$PROJECT_DIR,mount_tag=hostshare,security_model=none,id=hostshare"
-	-append "console=ttyS0 panic=1 oops=panic nokaslr loglevel=7 $( [ "$CI" = 1 ] && echo 'quiet_but_not_really' )"
+	-append "console=ttyAMA0 panic=1 oops=panic nokaslr loglevel=7"
 )
+
+if [ "$CI" = 1 ]; then
+	QEMU_ARGS[-1]="$QEMU_ARGS[-1] quiet_but_not_really"
+fi
 
 # KVM is unavailable on GitHub's standard runners (no nested virt), so CI
 # falls back to TCG. Locally, use KVM when the host offers it.
@@ -79,7 +89,7 @@ if [ -w /dev/kvm ] && [ "$CI" = 0 ]; then
 	QEMU_ARGS+=(-enable-kvm -cpu host)
 	echo ">>> KVM enabled"
 else
-	QEMU_ARGS+=(-cpu qemu64)
+	QEMU_ARGS+=(-accel tcg -cpu max)
 	echo ">>> TCG mode (no KVM) -- expect ~10x slowdown"
 fi
 
@@ -104,4 +114,17 @@ fi
 
 # nokaslr above is what makes gdb addresses stable across boots.
 echo ">>> Booting linux-$VERSION"
-exec qemu-system-x86_64 "${QEMU_ARGS[@]}"
+if qemu-system-aarch64 "${QEMU_ARGS[@]}"; then
+	qemu_rc=0
+else
+	qemu_rc=$?
+fi
+
+if [ -f "$STATUS_FILE" ]; then
+	guest_rc=$(tr -d '[:space:]' < "$STATUS_FILE")
+	case "$guest_rc" in
+	[0-9]*) exit "$guest_rc" ;;
+	esac
+fi
+
+exit "$qemu_rc"
