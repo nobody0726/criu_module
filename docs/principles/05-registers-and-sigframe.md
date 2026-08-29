@@ -3,6 +3,59 @@
 > 被引用于:[A3](../steps/A3-minimal-dump.md)、[A4](../steps/A4-threads.md)、
 > [A6](../steps/A6-signals-timers.md)、[B1](../steps/B1-mini-restore.md)
 
+**本篇是全项目唯一一篇架构相关的原理。** 其余 8 篇在 x86_64 和 aarch64 上一字不差。
+
+---
+
+## 0. 为什么这个项目是 aarch64
+
+先说清楚哪些东西真的绑架构,因为这决定了「换架构」的代价有多大:
+
+| 绑架构 | 与架构无关 |
+|---|---|
+| 寄存器名与数量 | VMA 遍历、`vm_next` |
+| `rt_sigframe` 布局 | cgroup freezer |
+| `ARCH_RT_SIGRETURN` 那几条汇编 | fd / pipe / shmem |
+| `core-$arch.proto` 字段号 | 镜像格式与 protobuf 编码 |
+| `task_pt_regs` 的定义 | pid / session / pgid |
+| 浮点状态的格式 | `clone3(set_tid)`(`__NR_clone3 = 435` 来自 `asm-generic/unistd.h`) |
+| TLS 寄存器 | 内核模块的符号限制 |
+
+**左列基本就是这一篇的内容。** 所以换架构要改的是这一篇 + A3/A4 的寄存器段 +
+B1 的最后一跳,不是整个计划。
+
+选 aarch64 的三个理由:
+
+1. **开发机是 Apple Silicon。** 原生速度,不用 TCG 模拟。这是便利,不是理由的核心。
+2. **aarch64 的寄存器/浮点模型干净得多。** 具体对比:
+
+   | | x86_64 | aarch64 |
+   |---|---|---|
+   | 浮点格式 | `xsave`:512B FXSAVE 区 + 64B header + 变长扩展区,`xstate_bv` 位图必须与内容一致,总大小靠 `CPUID` 算 | `vregs[32]` + `fpsr` + `fpcr`,定长 |
+   | CRIU 的 FPU 准备函数 | `criu/arch/x86/sigframe.c` 里一整套 | `criu/arch/aarch64/sigframe.c` 的 `sigreturn_prep_fpu_frame()` 是 `return 0;` |
+   | 32 位兼容层 | 有,`ARCH_RT_SIGRETURN_COMPAT` 是另一条完整分支 | 无。`kdat_compatible_cr()` 硬编码为 `0` |
+   | 段寄存器 | `cs`/`ss`/`ds`/`es`/`fs`/`gs` + `fs_base`/`gs_base` | 没有段的概念,TLS 是一个系统寄存器 |
+
+   x86 那套复杂度是历史包袱,不是知识。**对一个以「学清楚机制」为目标的项目,
+   少一层包袱是实质收益。**
+
+3. **ZDTM oracle 几乎没有损失。** 489 个静态测试里只有 13 个带 `arch` 键
+   (`test/zdtm.py:2730` 的逻辑是 `tdesc.get('arch', arch) != arch` —— 没有
+   `arch` 键的测试在所有架构上都跑)。x86_64 独占的只有 9 个:`fpu00`–`fpu03`、
+   `mmx00`、`sse00`、`sse20`、`rseq00`、`vdso01`,全是 FPU/SIMD/vDSO 类。
+   而上游 CRIU 的 `aarch64-test`(`.github/workflows/ci.yml:59`)在真 arm64
+   机器上跑全套 ZDTM,只排除 2 个测试。**这个 oracle 是被上游持续验证的。**
+
+### 一个必须先付的代价:PAC
+
+`criu/criu/arch/aarch64/crtools.c:117` 无条件用 `NT_ARM_PAC_ENABLED_KEYS`
+调 `PTRACE_GETREGSET`,而那个 regset 在 5.10.29 里不存在。所以本项目要求
+`CONFIG_ARM64_PTR_AUTH=n`,细节和实验门禁见
+[04-Dev-Environment 第 3.1 节](../04-Dev-Environment.md)。
+
+**代价是不覆盖 PAC 密钥的 C/R,写进限制列表。** 这是本项目在 scope 上反复使用的
+那个判据:明确不支持优于静默错误。
+
 ---
 
 ## 1. 一个线程的「执行位置」是什么
@@ -11,19 +64,40 @@
 
 | 寄存器 | 含义 |
 |---|---|
-| `rip` | 下一条要执行的指令地址 |
-| `rsp` | 栈顶 |
-| `rbp` | 帧指针 |
-| `rax`..`r15` | 通用寄存器,函数参数、局部变量、中间结果 |
-| `eflags` | 标志位(比较结果、进位等) |
-| `cs`/`ss`/`ds`/`es`/`fs`/`gs` | 段寄存器 |
-| `fs_base`/`gs_base` | 段基址 —— **TLS 就靠它** |
-| FPU/SSE/AVX 状态 | 浮点和向量寄存器,几百到几千字节 |
+| `pc` | 下一条要执行的指令地址(x86 的 `rip`) |
+| `sp` | 栈顶(x86 的 `rsp`) |
+| `regs[0]`..`regs[30]` | 31 个通用寄存器 x0–x30 |
+| `regs[29]` | 习惯上是帧指针 fp |
+| `regs[30]` | 链接寄存器 lr —— **函数返回地址在寄存器里,不在栈上** |
+| `pstate` | 处理器状态(条件标志 NZCV、中断屏蔽等),x86 的 `eflags` |
+| `tpidr_el0` | TLS 基址 —— **`__thread` 变量就靠它** |
+| `vregs[32]` + `fpsr` + `fpcr` | 浮点/SIMD 状态,定长 |
 
-**这些加起来就是「执行状态」的全部。** 把它们存下来,恢复时写回去,线程就从
-原来那条指令继续执行。
+**这些加起来就是「执行状态」的全部。** 存下来,恢复时写回去,线程就从原来那条
+指令继续执行。
 
 这是纯 A 类状态 —— 就是一堆字节,没有任何需要向内核重建的语义。
+
+`lr` 值得单独注意:aarch64 的函数返回地址在 `regs[30]` 里,而不是像 x86 那样
+压在栈上。它是 31 个通用寄存器之一,所以**只要 `regs[]` 全部存对就自动正确**,
+不需要特殊处理。提出来只是因为它容易让读惯 x86 的人困惑。
+
+### `core-aarch64.proto` 的字段
+
+```protobuf
+message user_aarch64_regs_entry {
+	repeated uint64 regs	= 1;
+	required uint64 sp	= 2;
+	required uint64 pc	= 3;
+	required uint64 pstate	= 4;
+}
+```
+
+**四个字段。** 对比 `core-x86.proto` 的 27 个。
+
+`regs` 是 `repeated`,不是固定 31 个字段 —— 所以序列化时要按顺序 append 31 次,
+**顺序就是语义**,错一位就是 x5 的值跑到 x6 里。这是 protobuf `repeated` 字段
+的通用风险,[04-image-format](04-image-format.md) 里讲过。
 
 ---
 
@@ -31,23 +105,20 @@
 
 ### `task_pt_regs`
 
-一个被停下来的任务,它的用户态寄存器保存在**内核栈的顶端**。内核在从用户态
-进入内核态时(系统调用、中断、异常)会把它们压在那里。
+一个被停下来的任务,它的用户态寄存器保存在**内核栈的顶端**。内核在从用户态进入
+内核态时(系统调用、中断、异常)会把它们压在那里。
 
 ```c
-#define task_pt_regs(task) \
-({									\
-	unsigned long __ptr = (unsigned long)task_stack_page(task);	\
-	__ptr += THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING;		\
-	((struct pt_regs *)__ptr) - 1;					\
-})
+#define task_pt_regs(p) \
+	((struct pt_regs *)(THREAD_SIZE + task_stack_page(p)) - 1)
 ```
 
-(`arch/x86/include/asm/processor.h:763` 附近)
+(`arch/arm64/include/asm/processor.h:257`)
 
-就是「内核栈顶往下退一个 `pt_regs` 的大小」。
+就是「内核栈顶往下退一个 `pt_regs` 的大小」。比 x86 那版还短一点 —— x86 要减一个
+`TOP_OF_KERNEL_STACK_PADDING`,arm64 没有这个补丁。
 
-**它是一个宏,所以不需要任何导出符号。** 对内核模块来说这很重要 —— 
+**它是一个宏,所以不需要任何导出符号。** 对内核模块来说这很重要 ——
 `EXPORT_SYMBOL` 的限制在这里完全不适用。
 
 对比 CRIU:它必须对**每个线程**单独 `PTRACE_ATTACH` + `PTRACE_GETREGSET`。
@@ -56,223 +127,432 @@
 
 ### 前提:任务必须真的停下来了
 
-`task_pt_regs()` 只在任务被调度出去、上下文完整保存之后才可靠。如果任务还在
-CPU 上跑,那块内存里是上一次进入内核时的旧值。
+`task_pt_regs()` 只在任务被调度出去、上下文完整保存之后才可靠。如果任务还在 CPU
+上跑,那块内存里是上一次进入内核时的旧值。
 
 这就是 [02-freezing](02-freezing.md) 里强调「FROZEN ≠ 寄存器可读」的原因:
 写完 `FROZEN` 必须轮询 `task_is_running()` 直到所有线程都真的停了。
 
-### `pt_regs` 与 `user_regs_struct` 不是一回事
+### aarch64 的一个便利:ptrace ABI 结构体是内嵌的
 
-| | `struct pt_regs` | `struct user_regs_struct` |
-|---|---|---|
-| 定义在 | `arch/x86/include/asm/ptrace.h` | `arch/x86/include/uapi/asm/ptrace.h` |
-| 用途 | 内核内部 | ptrace ABI,给用户态看的 |
-| 字段顺序 | 内核压栈顺序 | ABI 规定的顺序 |
-
-CRIU 的 `core-x86.proto` 用的是 **ptrace ABI 的语义**。x86_64 上两者布局很接近,
-但**不能假设逐字段对应**。要按字段名逐个赋值,不要 `memcpy` 整个结构体。
-
-### 段寄存器和 TLS
-
-`fs_base` 是 TLS 的实现基础:`__thread` 变量的访问被编译成 `%fs:offset` 形式的
-寻址。所以每个线程的 `fs_base` 不同,而且**必须精确恢复**,否则所有 TLS 变量都
-会指向错误的地方。
-
-`core-x86.proto` 的字段 22/23 就是它们:
-
-```protobuf
-	required uint64			fs_base		= 22;
-	required uint64			gs_base		= 23;
-```
-
-内核侧在 `task->thread.fsbase`。但如果线程正在 CPU 上跑,真值在 MSR 里,
-所以更稳妥的读法是 `x86_fsbase_read_task(t)`。任务已冻结时直接读字段通常也对,
-**但这个假设必须写在注释里。**
-
----
-
-## 3. `orig_ax`:一个容易误解的字段
-
-`core-x86.proto:29`:
-
-```protobuf
-	required uint64			orig_ax		= 16;
-```
-
-x86_64 上系统调用号放在 `rax`,返回值也放在 `rax` —— 它们会互相覆盖。所以内核
-在进入系统调用时把原始的 `rax`(即系统调用号)另存一份到 `orig_ax`。
-
-`orig_ax` 的取值:
-
-| 值 | 含义 |
-|---|---|
-| ≥ 0 | 任务**正在系统调用中**,这是系统调用号 |
-| -1 | 任务不在系统调用中(被中断或异常打断) |
-
-### 为什么这个字段对 C/R 很重要
-
-考虑一个在 `pause()` 里被冻结的进程。它的状态是:
-
-- `rip` 指向 `pause()` 之后的下一条指令(系统调用已经进去了)
-- `orig_ax` = `__NR_pause`
-- `rax` = `-ERESTARTNOHAND`(内核标记「这个系统调用需要重启」)
-
-恢复时,内核看到 `rax` 是 `-ERESTARTNOHAND` 且 `orig_ax` 是有效的系统调用号,
-就会**把 `rip` 回退一条指令、把 `rax` 恢复成 `orig_ax`、重新执行这个系统调用**。
-
-**结果:进程恢复后仍然阻塞在 `pause()` 里,和 checkpoint 时一样。**
-
-这就是系统调用重启机制,它是「被阻塞在系统调用里的进程也能被正确恢复」的原因。
-
-**所以 A3 里那句「`orig_ax` 会是 `__NR_pause`,这是对的,不要试图把它归零」
-不是权宜之计,是必须如此。** 归零会导致进程恢复后从 `pause()` 返回,以为自己
-收到了信号。
-
----
-
-## 4. FPU 状态:格式很挑剔
-
-FPU/SSE/AVX 状态用 `xsave` 指令保存,格式是:
-
-```
-[512 bytes]  传统 FXSAVE 区域(x87 + SSE 的 xmm0-15)
-[64 bytes]   xsave header,里面有 xstate_bv 位图
-[变长]       扩展状态区域(AVX 的 ymm 高半、AVX-512 的 zmm ...)
-```
-
-`xstate_bv` 位图声明「哪些状态实际存在这块内存里」。**位图和实际内容必须一致**,
-否则 `xrstor` 会加载垃圾,或者返回错误。
-
-区域的总大小取决于 CPU 支持哪些特性,通过 `CPUID` 查询。
-
-**结论:照抄 CRIU 的处理,不要自己算。** 复用
-`criu/criu/arch/x86/sigframe.c` 和 `criu/compel/arch/x86/` 里的定义。
-
-填错的症状有两种,后一种更糟:
-- `rt_sigreturn` 返回 `-EFAULT`(响亮,好调试)
-- **成功了但浮点寄存器是垃圾**(静默,恢复后的进程算出错误的浮点结果)
-
----
-
-## 5. `rt_sigreturn`:恢复寄存器的唯一办法
-
-现在到了最关键的部分。
-
-### 问题
-
-你有一整套目标寄存器的值,你要让当前线程「变成」那个状态。逐个设是不行的:
-
-```
-设 rax  ✓
-设 rbx  ✓
-...
-设 rsp  ✓   ← 栈换了,局部变量全部失效
-设 rip  ✗   ← 一旦设了 rip 就跳走了,后面的寄存器永远没机会设
-```
-
-**必须原子地一次全部设好。** 而 `rip` 必然是最后一个,可它一设就跳走。
-
-用户态没有「原子地设置所有寄存器」的指令。`iret` 只能在内核态用。
-
-### 内核已经有这个机制了 —— 信号
-
-内核在投递信号时做了什么:
-
-```
-1. 保存当前所有寄存器(通用 + 段 + eflags + FPU + 信号掩码)
-   打包成一个 struct rt_sigframe,放到用户栈上
-2. 设置 rsp 指向那个 sigframe,rip 指向 handler
-3. handler 执行
-4. handler 返回时跳到 sa_restorer,它调 rt_sigreturn
-5. 内核从栈上那个 sigframe 里把所有寄存器读回来,原子恢复
-6. 线程回到被信号打断的那条指令,像什么都没发生过
-```
-
-**第 5 步就是我们要的那个原子操作。** 内核每天都在做这件事。
-
-### CRIU 反过来用它
-
-**手工在栈上构造一个 `rt_sigframe`,填进目标进程 checkpoint 时的寄存器值,
-然后直接调 `rt_sigreturn`。**
-
-内核不知道这不是真的信号返回 —— 它照常把那些值加载进寄存器,然后「返回」到
-`rip` 指向的位置,也就是目标进程被 checkpoint 的那条指令。
-
-实现在 `criu/criu/pie/restorer.c:681`:
+x86 上 `struct pt_regs` 和 `struct user_regs_struct` 是两个独立定义、字段顺序
+不同的结构体,所以**不能 `memcpy`**。arm64 不一样:
 
 ```c
-static void noinline rst_sigreturn(unsigned long new_sp, struct rt_sigframe *sigframe)
+struct pt_regs {
+	union {
+		struct user_pt_regs user_regs;
+		struct {
+			u64 regs[31];
+			u64 sp;
+			u64 pc;
+			u64 pstate;
+		};
+	};
+	u64 orig_x0;
+	s32 syscallno;
+	/* ... 其余内核内部字段 ... */
+};
+```
+
+(`arch/arm64/include/asm/ptrace.h`)
+
+**ptrace ABI 的 `struct user_pt_regs` 就是 `pt_regs` 的第一个成员**,内核自己用
+union 保证了两者布局一致。所以 `&task_pt_regs(t)->user_regs` 直接就是 ABI 视图。
+
+即便如此,**填 protobuf 时仍然按字段名逐个赋值**,不要指望结构体和 proto 消息
+有任何布局关系 —— proto 是变长编码,和 C 结构体没有对应。CRIU 自己也是逐个赋:
+
+```c
+	for (i = 0; i < 31; ++i)
+		assign_reg(core->ti_aarch64->gpregs, regs, regs[i]);
+	assign_reg(core->ti_aarch64->gpregs, regs, sp);
+	assign_reg(core->ti_aarch64->gpregs, regs, pc);
+	assign_reg(core->ti_aarch64->gpregs, regs, pstate);
+```
+
+(`criu/criu/arch/aarch64/crtools.c` 的 `save_task_regs()`)
+
+注意 `orig_x0` 和 `syscallno` **在 union 之外** —— 它们不属于 ptrace ABI,
+用户态看不到,proto 里也没有。这一点是下一节的关键。
+
+### 内核模块在这里多拿两样东西
+
+`tpidr_el0`(TLS)和浮点状态都**不在** `pt_regs` 里,它们在 `thread_struct`:
+
+```c
+	/* Both TLS and FPSIMD live in thread.uw, not in pt_regs. A module reads
+	 * them straight out of the task; CRIU needs a parasite for the former
+	 * and a ptrace regset for the latter.
+	 */
+	u64 tls = task->thread.uw.tp_value;
+	struct user_fpsimd_state *fp = &task->thread.uw.fpsimd_state;
+```
+
+CRIU 拿 TLS 的方式是在**parasite 里**执行一条指令:
+
+```c
+static inline void arch_get_tls(tls_t *ptls)
 {
-	ARCH_RT_SIGRETURN_RST(new_sp, sigframe);
+	tls_t tls;
+	asm("mrs %0, tpidr_el0" : "=r"(tls));
+	*ptls = tls;
 }
 ```
 
-而那个宏(x86_64 native 分支,定义在
-`criu/compel/arch/x86/src/lib/include/uapi/asm/sigframe.h:198`)展开就是**三条指令**:
+(`criu/criu/arch/aarch64/include/asm/parasite.h:4-8`)
 
-```
-	movq %0, %%rax          ; new_sp -> rax
-	movq %%rax, %%rsp       ; 把栈指针指向构造好的 sigframe
-	movl $__NR_rt_sigreturn, %%eax
-	syscall
-```
+`mrs tpidr_el0` 只能读**自己的**,所以必须让目标进程自己执行 —— 这就是为什么这件事
+非得走 parasite。内核模块直接读 `thread.uw.tp_value`,**这是第五个优势**,而且它是
+aarch64 特有的:x86 上 CRIU 有 `ptrace(PTRACE_ARCH_PRCTL)` 可以旁路,不需要 parasite。
 
-**整个 A 类状态的恢复,最终归结为这三条指令。** 这是 CRIU 里最优雅的一处设计。
-
-### 顺带恢复的东西
-
-`rt_sigframe` 里除了寄存器还有 `uc_sigmask` —— **信号掩码也是被
-`rt_sigreturn` 一起恢复的。** 所以恢复信号掩码不需要额外调 `sigprocmask()`,
-把值填进 sigframe 就行。
-
-这也解释了为什么 `blocked` 掩码存在 `core-$tid.img` 里(和寄存器一起)而不是
-`sigacts` 里:它是「随 sigframe 恢复」的那一类。
-
-### `sa_restorer` 为什么不能重算
-
-用户态的 `struct sigaction` 有个 `sa_restorer` 字段,指向 libc 里那段调
-`rt_sigreturn` 的代码。它必须**原样保存原样恢复**:
-
-- 它是 libc 内部实现细节,地址在 libc 的代码段里
-- restore 时整个地址空间是按原样恢复的,所以那个地址仍然有效
-- **试图重新计算它意味着你要知道当前 libc 把那段代码放在哪** —— 而目标进程的
-  libc 可能是另一个版本
-
-内核里它在 `task->sighand->action[i].sa.sa_restorer`。存字节,别动脑。
+`uw` 这个子结构的存在本身也是一个信号 —— 内核把它单独分出来,是为了给
+hardened usercopy 划白名单(见 `arch/arm64/kernel/process.c` 里的
+`arch_task_struct_size` 相关注释)。里面装的正是「可以给用户态看」的那部分。
 
 ---
 
-## 6. 整条链是怎么闭合的
+## 3. 系统调用重入:x86 的 `orig_ax` 在 aarch64 去哪了
 
-把这一篇和 [03](03-memory-and-vma.md) 的 premap/mremap 接起来,restore 的最后
-三步是:
+这是 x86 → aarch64 变化最大的一节,而且方向是**变简单**。
+
+### 问题本身在两个架构上都存在
+
+进程被冻结时,它很可能正停在一个阻塞系统调用里 —— `read()`、`pause()`、
+`epoll_wait()`。恢复之后,它必须**重新进入**那个系统调用,而不是拿着一个垃圾返回值
+往下走。
+
+x86 用 `orig_ax` 解决:内核在进入系统调用时把系统调用号存进 `orig_ax`,
+`rax` 则被返回值覆盖。CRIU 检查 `orig_ax` 来判断「是否停在系统调用里」,
+并把 `rip` 回退 2 字节(`syscall` 指令的长度)。`core-x86.proto` 里有 `orig_ax`
+这个字段就是为此。
+
+### aarch64:内核已经替你做完了
+
+`struct user_pt_regs` 里**没有** `syscallno`,也没有 `orig_x0`,所以
+`core-aarch64.proto` 里没有对应字段。这不是遗漏,是因为不需要:
+
+```c
+	if (syscall) {
+		continue_addr = regs->pc;
+		restart_addr = continue_addr - (compat_thumb_mode(regs) ? 2 : 4);
+		retval = regs->regs[0];
+
+		/*
+		 * Avoid additional syscall restarting via ret_to_user.
+		 */
+		forget_syscall(regs);
+
+		/*
+		 * Prepare for system call restart. We do this here so that a
+		 * debugger will see the already changed PC.
+		 */
+		switch (retval) {
+		case -ERESTARTNOHAND:
+		case -ERESTARTSYS:
+		case -ERESTARTNOINTR:
+		case -ERESTART_RESTARTBLOCK:
+			regs->regs[0] = regs->orig_x0;
+			regs->pc = restart_addr;
+			break;
+		}
+	}
+```
+
+(`arch/arm64/kernel/signal.c:851-876`,`do_signal()`)
+
+逐句读这段:
+
+1. `restart_addr = pc - 4` —— aarch64 指令定长 4 字节,`svc #0` 就在 `pc - 4`。
+2. `forget_syscall(regs)` 把 `syscallno` 置为 `NO_SYSCALL`
+   (`arch/arm64/include/asm/ptrace.h:207-210`)。
+3. 如果返回值是 `-ERESTART*`,**把 `regs[0]` 恢复成原始的第一个参数,并把 `pc`
+   退回 `svc` 那条指令上。**
+
+第 3 步就是 CRIU 在 x86 上要手动做的事。而那句注释是这一节的关键证据:
+
+> **so that a debugger will see the already changed PC**
+
+**内核显式承诺:调试器看到的是已经改好的 PC。** 所以任何通过信号路径观察到的
+寄存器快照,已经是「可重入形式」了。存下来直接用,不需要额外字段。
+
+### 这条保证覆盖我们的两条采集路径吗
+
+要,而且都覆盖 —— 关键在于 `do_signal()` 的重入调整在 `get_signal()` **之前**:
+
+| 采集路径 | 停在哪 | 是否经过 `do_signal()` |
+|---|---|---|
+| CRIU:`PTRACE_SEIZE` + `PTRACE_INTERRUPT` | ptrace-stop | 是。ptrace 停点在 `get_signal()` 里 |
+| 本项目:cgroup freezer | freezer trap | 是。`kernel/signal.c:2625` 的 `do_freezer_trap()` 也在 `get_signal()` 里 |
+
+两条路都是「先调整 `pc`,再停下来」。**所以 A2 的冻结路径继承了同一个保证**,
+这也是本节值得完整读源码的原因 —— 结论不是「CRIU 这么做所以我们这么做」,而是
+「内核在这个位置做了这件事,而我们的采集点在它之后」。
+
+> **这一节的结论是读源码得出的,还没有实测。** 具体待验:一个阻塞在 `pause()` 里
+> 的进程,冻结后 `task_pt_regs()` 里的 `pc` 是否确实指向 `svc` 指令(而不是它的
+> 下一条)。**这是 A3 欠的一个测试用例**,列在 A3 的测试表里。
+> 判定方法很直接:读出 `pc`,再从 `/proc/PID/mem` 的 `pc` 处读 4 字节,
+> 检查它是不是一条 `svc #0`(编码 `0xd4000001`)。
+
+---
+
+## 4. 浮点状态:定长,但有一个字段序陷阱
+
+### 格式本身很简单
+
+```c
+struct user_fpsimd_state {
+	__uint128_t	vregs[32];
+	__u32		fpsr;
+	__u32		fpcr;
+	__u32		__reserved[2];
+};
+```
+
+(`arch/arm64/include/uapi/asm/ptrace.h`)
+
+**32 个 128 位向量寄存器 + 两个 32 位控制/状态寄存器,定长 528 字节。** 没有位图,
+没有 `CPUID` 计算,没有变长扩展区。CRIU 在 aarch64 上的 FPU 准备函数是:
+
+```c
+int sigreturn_prep_fpu_frame(struct thread_restore_args *args,
+			     struct thread_restore_args *ret_args)
+{
+	return 0;
+}
+```
+
+(`criu/criu/arch/aarch64/sigframe.c`)
+
+对比 x86 那边一整套 `xsave` 大小探测、`xstate_bv` 位图校验、对齐处理。
+**这个 `return 0;` 是选 aarch64 最直观的收益证据。**
+
+### 冻结的任务的 FPSIMD 是可读的,但 SVE 任务需要同步
+
+```c
+static int __fpr_get(struct task_struct *target,
+		     const struct user_regset *regset,
+		     struct membuf to)
+{
+	struct user_fpsimd_state *uregs;
+
+	sve_sync_to_fpsimd(target);
+
+	uregs = &target->thread.uw.fpsimd_state;
+
+	return membuf_write(to, uregs, sizeof(*uregs));
+}
+```
+
+(`arch/arm64/kernel/ptrace.c:598-609`)
+
+两点要看:
+
+1. **`fpsimd_preserve_current_state()` 只在 `target == current` 时被调用**
+   (在外层的 `fpr_get` 里)。对一个被冻结的**别的**任务,它的 FPSIMD 在被调度出去时
+   就已经落到 `thread.uw.fpsimd_state` 里了,直接读即可。
+2. **但 `sve_sync_to_fpsimd(target)` 必须照做。** 如果任务在用 SVE,寄存器的权威副本
+   在 `thread.sve_state` 里,`uw.fpsimd_state` 是过期的。这个函数把前者的低 128 位
+   同步回后者。
+
+`sve_sync_to_fpsimd` 是否导出、能否在模块里调,**是 S0 要验的一项**。
+拿不到的退路是明确检测 `thread.sve_state != NULL` 并返回 `-EOPNOTSUPP` ——
+按本项目的判据,明确不支持优于静默读到过期数据。
+
+> 注意这个退路的性质:**它比「不支持」更强,它是「检测到就报错」。**
+> 一个只读 `uw.fpsimd_state` 而不检查 SVE 的实现,在 SVE 进程上会**安静地**
+> 存下错误的向量寄存器,恢复后的浮点计算结果错。这是本文件里第二个「症状是
+> 静默错误」的地方。
+
+### 陷阱:ptrace 结构体和 sigframe 结构体的字段顺序是反的
+
+这是 aarch64 上唯一一个能造成静默数据损坏的新问题,值得单独记住:
+
+```c
+/* ptrace / thread_struct 视图 */
+struct user_fpsimd_state {
+	__uint128_t	vregs[32];	/* 先 */
+	__u32		fpsr;		/* 后 */
+	__u32		fpcr;
+	__u32		__reserved[2];
+};
+
+/* sigframe 视图 */
+struct fpsimd_context {
+	struct _aarch64_ctx head;	/* 多一个头 */
+	__u32		fpsr;		/* 先 */
+	__u32		fpcr;
+	__uint128_t	vregs[32];	/* 后 */
+};
+```
+
+(前者 `arch/arm64/include/uapi/asm/ptrace.h`,后者 `arch/arm64/include/uapi/asm/sigcontext.h`)
+
+**两者字段完全相同,顺序完全相反,还差一个 `head`。** 所以:
+
+```c
+	/* NEVER memcpy between user_fpsimd_state and fpsimd_context: same
+	 * fields, reversed order, plus a _aarch64_ctx header. Copy field by
+	 * field. A memcpy compiles, runs, and silently produces garbage
+	 * vregs.
+	 */
+```
+
+A3(dump 侧,写 `core-aarch64.proto`)和 B1(restore 侧,填 sigframe)各自碰一次
+这个转换,**方向相反**。两边都必须逐字段拷。
+
+`head` 也不能忘:`head.magic = FPSIMD_MAGIC`(0x46508001)、
+`head.size = sizeof(struct fpsimd_context)`。内核的 `parse_user_sigframe()` 靠
+magic 识别这个块,写错了 `rt_sigreturn` 直接 `SIGSEGV`。
+
+---
+
+## 5. `rt_sigreturn` —— 为什么最后一跳只能这么做
+
+### 问题:寄存器不能一个一个设
+
+restore 的最后一步是「让新进程的所有寄存器等于 dump 时的值」。看起来直白,
+但有一个死结:
+
+**执行「设置寄存器」这个动作本身需要用到寄存器。**
+
+设 `sp`?那正在跑的代码就没栈了。设 `pc`?那就跳走了,后面的代码不再执行。
+无论什么顺序,总有最后一个寄存器没法在「不破坏正在执行的代码」的前提下设进去。
+
+用 ptrace 从外部设呢?那要求有另一个进程在外面操作 —— 而 B1 的模型是进程
+**把自己变成**目标,没有外部操作者。(而且 ptrace 设完之后,detach 那一刻的语义
+还要再讨论一次。)
+
+### 内核早就解决了这个问题
+
+信号处理返回时,内核必须**原子地**恢复被中断时的全部寄存器 —— 这和我们的需求
+一模一样。它的做法是 `rt_sigreturn`:
+
+1. 用户态在栈上准备一个 `struct rt_sigframe`,里面装着「要恢复成什么样」
+2. 把 `sp` 指向它
+3. 执行 `rt_sigreturn` 系统调用
+4. **内核从这个 frame 恢复所有寄存器,然后返回用户态**
+
+第 4 步在内核里发生,由内核的返回路径一次性完成。**这就是我们要的原子性。**
+CRIU 用的不是一个技巧,是**内核为这件事提供的唯一机制**。
+
+### aarch64 上就三条指令
+
+```c
+#define ARCH_RT_SIGRETURN(new_sp, rt_sigframe)					\
+	asm volatile(								\
+			"mov sp, %0					\n"	\
+			"mov x8, #"__stringify(__NR_rt_sigreturn)"	\n"	\
+			"svc #0						\n"	\
+			:							\
+			: "r"(new_sp)						\
+			: "x8", "memory")
+```
+
+(`criu/compel/arch/aarch64/src/lib/include/uapi/asm/sigframe.h:46`)
+
+`mov sp` 设栈顶 → `x8` 放系统调用号(aarch64 的系统调用号在 x8)→ `svc #0` 进内核。
+**之后这段代码就不存在了** —— 内核不会返回到 `svc` 的下一条指令,而是返回到
+frame 里那个 `pc`。
+
+注意这里为什么必须是内联汇编而不是 `syscall(__NR_rt_sigreturn)`:libc 的封装会
+先建自己的栈帧、可能用到 `sp`,而我们刚刚把 `sp` 指到了一个精心构造的 frame 上。
+**从 `mov sp` 到 `svc` 之间不能有任何编译器插入的代码。**
+
+### frame 里装什么
+
+```c
+struct rt_sigframe {
+	siginfo_t info;
+	ucontext_t uc;
+	uint64_t fp;
+	uint64_t lr;
+};
+```
+
+(同一个头文件)
+
+`uc.uc_mcontext` 里是 `regs[31]` / `sp` / `pc` / `pstate` / `fault_address`,
+后面跟着 `aux_context`(`fpsimd_context` + 结束标记)。**这就是第 1 节那张表的
+全部内容,以内核规定的布局排列。**
+
+末尾的 `fp` / `lr` 是 CRIU 加的,不是内核结构的一部分 —— 内核只要求 `sp` 指向的
+位置开始是 `info` + `uc`。
+
+### 顺带解决的一件事:信号掩码
+
+`uc.uc_sigmask` 也会被 `rt_sigreturn` 恢复。**所以信号掩码不需要单独一步。**
+这解释了 A6 的一个设计:掩码存在 `core-$tid.img` 里(和寄存器一起),
+而不是在 `sigacts` 里 —— 因为它和寄存器在同一时刻、由同一个机制恢复。
+
+> 这是 A/B 划分的一个有意思的边缘案例:信号掩码是 B 类状态(内核替进程记的),
+> 但它的恢复搭了 A 类状态的车。**「谁持有」和「怎么恢复」是两个不同的问题。**
+
+---
+
+## 6. 这一跳怎么和其他步骤接上
+
+`rt_sigreturn` 只是最后一条指令。它成立要靠前面全部铺好:
 
 ```
-1. premap 好目标的所有 VMA,内容填好           ← A 类内容就位,但地址不对
-2. 跳到 bootstrap,unmap 旧空间,mremap 到最终地址  ← A 类地址就位
-   此时:目标的内存全部正确,栈上有构造好的 sigframe
-   但当前执行的还是 restore 的代码
-3. rt_sigreturn                                ← A 类寄存器就位,不返回
+1. B 类状态全部就位(fd、信号处理表、pid、session)
+2. 目标的地址空间就位(premap → mremap,原理 03)
+3. 在那个地址空间的某处构造好 rt_sigframe
+4. mov sp, frame; mov x8, #__NR_rt_sigreturn; svc #0
+   └─ 之后这段代码消失,进程「变成」目标
 ```
 
-第 3 步之后,这个 task 从各种可观测角度看,就**是**原来那个进程了:
-内存一致、寄存器一致、pid 一致、fd 一致、信号状态一致。
+**第 4 步之后 restorer 自己的代码和栈都不在了**,所以任何还没做完的事情都永远做不了了。
+这就是 [01-process-anatomy](01-process-anatomy.md) 里那条唯一的强序约束的来源:
 
-**载体全新,内容全等。**
+> A 类恢复(地址空间替换)必须在所有 B 类恢复之后。
+
+frame 放在哪也有约束:它必须在**替换之后仍然有效的**内存里 —— 也就是目标地址空间
+里的某个位置,通常是目标某个线程栈的顶部。放在 restorer 自己的栈上是一个典型错误:
+第 3 步和第 4 步之间地址空间已经换了,那块内存可能已经不存在。这是 B1 的一个
+具体实现要点。
+
+### 多线程时每个线程一份
+
+每个线程有自己的 `rt_sigframe`,各自执行自己的 `rt_sigreturn`。它们**互不同步** ——
+没有「所有线程一起跳」的必要,因为每个线程的 A 类状态是独立的。
+
+这是 A4 那句「`mm` 存一份,寄存器每个都要」的 restore 侧对应物。
 
 ---
 
 ## 7. 延伸阅读
 
-- `arch/x86/kernel/signal.c` 的 `setup_rt_frame()` 和 `sys_rt_sigreturn()` —— 
-  内核两个方向的实现,**读它们是理解这一篇的最好办法**
-- `arch/x86/include/asm/processor.h` —— `task_pt_regs` 的定义
-- `criu/criu/arch/x86/sigframe.c` —— CRIU 怎么填 sigframe
-- `criu/compel/arch/x86/src/lib/include/uapi/asm/sigframe.h` —— `rt_sigframe`
-  的结构定义和那几个汇编宏
-- `criu/images/core-x86.proto` —— 字段清单
-- `man 2 rt_sigreturn` —— 简短但值得一读,它明确说了「这个系统调用不该被程序直接
-  调用」,而 CRIU 正是那个例外
-- [03-memory-and-vma](03-memory-and-vma.md) —— premap/mremap
-- [09-restore-ordering](09-restore-ordering.md) —— 为什么这一步必须最后做
+按「先看机制、再看 CRIU 怎么用」的顺序:
+
+**内核侧:**
+
+- `arch/arm64/kernel/signal.c` —— 本篇的主要依据。重点三处:
+  - `do_signal()`(第 843 行)—— 第 3 节的系统调用重入
+  - `setup_rt_frame()` / `setup_return()`(第 700-760 行)—— frame 怎么建的,
+    **反过来读就是 B1 要怎么填**
+  - `__sys_rt_sigreturn()` / `restore_sigframe()` —— frame 怎么被消费的
+- `arch/arm64/kernel/fpsimd.c` —— `sve_sync_to_fpsimd()`、
+  `fpsimd_preserve_current_state()`。第 4 节那个 SVE 陷阱的出处
+- `arch/arm64/include/uapi/asm/sigcontext.h` —— `fpsimd_context` 的权威定义。
+  **和 `uapi/asm/ptrace.h` 里的 `user_fpsimd_state` 对照读**,亲眼看一遍字段序是反的
+- `arch/arm64/include/asm/processor.h:257` —— `task_pt_regs`
+- `arch/arm64/kernel/ptrace.c` —— regset 表。**顺便能看到 5.10 里到底注册了哪些 PAC
+  regset**,也就是第 0 节那个门禁的直接证据
+
+**CRIU 侧:**
+
+- `criu/criu/arch/aarch64/crtools.c` —— `save_task_regs()` / `restore_gpregs()`。
+  A3 和 B1 各抄一半
+- `criu/criu/arch/aarch64/sigframe.c` —— 那个 `return 0;`
+- `criu/compel/arch/aarch64/src/lib/include/uapi/asm/sigframe.h` ——
+  `ARCH_RT_SIGRETURN` 和 `struct rt_sigframe`
+- `criu/criu/arch/aarch64/include/asm/parasite.h` —— TLS 为什么非得走 parasite
+- `criu/images/core.proto` + `criu/images/core-aarch64.proto` —— 镜像里的字段
+- `criu/criu/pie/restorer.c` 的 `restore_thread()` —— 最后一跳的完整上下文。
+  **这是整个 CRIU 里最值得读一遍的一个函数**
+
+**对照阅读(可选):** `criu/criu/arch/x86/crtools.c` 和
+`compel/arch/x86/.../sigframe.h`。看一眼 x86 的 `xsave` 处理和 `orig_ax` 逻辑,
+就能理解第 0 节那张对比表不是修辞。

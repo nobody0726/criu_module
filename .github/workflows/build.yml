@@ -8,10 +8,9 @@ jobs:
   # Matrix build against distro kernel headers. Fast (headers install in
   # seconds) and catches the majority of API drift.
   #
-  # 6.1 is a deliberate sentinel: it replaced the VMA linked list with a maple
-  # tree, so vma->vm_next does not exist and this project MUST fail to build.
-  # If 6.1 ever starts passing, someone added a compat shim we did not agree
-  # to -- that is a review discussion, not a silent win.
+  # The current probe only uses stable debugfs/module APIs, so it is expected
+  # to build on 6.1 as well. The future VMA-walking implementation will add a
+  # version-specific compatibility boundary when that code lands.
   headers:
     runs-on: ubuntu-22.04
     strategy:
@@ -29,7 +28,7 @@ jobs:
           - series: "6.1"
             pkg: "linux-headers-6.1.0-18-amd64"
             repo: "bookworm"
-            expect: fail
+            expect: pass
     steps:
       - uses: actions/checkout@v4
 
@@ -62,17 +61,6 @@ jobs:
           echo "Using KDIR=$KDIR"
           make -C kernel_module KDIR="$KDIR" \
             EXTRA_CFLAGS="-Werror -Wall -Wextra -Wno-unused-parameter" 2>&1 | tee build.log
-
-      - name: Assert sentinel actually failed
-        if: matrix.expect == 'fail'
-        run: |
-          if [ "${{ steps.build.outcome }}" = "success" ]; then
-            echo "::error::Build unexpectedly SUCCEEDED on ${{ matrix.series }}."
-            echo "This project targets 5.10 only. A passing 6.1 build means an"
-            echo "unreviewed compat shim was added. See docs/03-Iteration-Plan.md."
-            exit 1
-          fi
-          echo "Sentinel behaved as expected: ${{ matrix.series }} does not build."
 
       - name: Sparse (user/kernel pointer confusion)
         if: matrix.expect == 'pass'

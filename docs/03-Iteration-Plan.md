@@ -24,7 +24,8 @@ QEMU/virtme-ng、GitHub Actions、CRIU 的 `crit` 与 ZDTM 测试套件。
 | 约束 | 精确值 |
 |---|---|
 | 目标内核 | **Linux 5.10.29**。6.1+ 用 maple tree 取代了 VMA 链表,`vma->vm_next` 不存在 |
-| 架构 | **x86_64 only**。`rt_sigframe` 与寄存器布局是 arch-specific |
+| 架构 | **aarch64 only**。`rt_sigframe` 与寄存器布局是 arch-specific。理由见 [05 第 0 节](principles/05-registers-and-sigframe.md) |
+| 内核配置 | **`CONFIG_ARM64_PTR_AUTH=n`**。否则真 criu 会 dump 失败,整个计划失去验证器。见 [04 第 3.1 节](04-Dev-Environment.md) |
 | 代码风格 | Linux Kernel Coding Style:tab = 8 字符,行宽首选 80、上限 120 |
 | 大括号 | 函数的 `{` 独占一行;`if`/`for`/`while`/`switch` 的 `{` 跟在行尾 |
 | 注释 | 只用 `/* ... */`,多行注释每行以 ` * ` 开头 |
@@ -140,7 +141,7 @@ A4/A5/A6/A7 之间**互不依赖**,可任意顺序、可并行。
 | 02 | [怎么让进程停下来](principles/02-freezing.md) | `SIGSTOP` 的三个致命问题、`PTRACE_SEIZE`、cgroup freezer | A2 |
 | 03 | [地址空间与 VMA](principles/03-memory-and-vma.md) | 两个正交轴 → 四种 VMA、哪些页要存、premap→mremap | A1、A3、A8 |
 | 04 | [镜像格式](principles/04-image-format.md) | 为什么照抄 CRIU 格式、protobuf 的两个陷阱、内核里做编码 | A3、B1 |
-| 05 | [寄存器与 sigframe](principles/05-registers-and-sigframe.md) | `task_pt_regs`、`orig_ax`、**`rt_sigreturn` 那三条指令** | A3、A4、A6、B1 |
+| 05 | [寄存器与 sigframe](principles/05-registers-and-sigframe.md) | **全项目唯一一篇 arch 相关**。`task_pt_regs`、系统调用重入、**`rt_sigreturn` 那三条指令** | A3、A4、A6、B1 |
 | 06 | [pid、会话、进程组](principles/06-pid-and-session.md) | `clone3(set_tid)`、**两遍 fork 的必然性**、结构性 vs 同步性 | A4、A7、B2 |
 | 07 | [fd 与共享对象](principles/07-fd-and-shared-objects.md) | 三层间接、`kcmp` vs 比较指针、pipe 两端配对 | A5、A8 |
 | 08 | [内核模块的边界](principles/08-kernel-module-limits.md) | 四个真实优势、三个 restore 障碍、「不要用」清单 | S0、X1 |

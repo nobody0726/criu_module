@@ -72,6 +72,7 @@ if [ "${KASAN:-1}" = "1" ]; then
 fi
 
 # --- interfaces the module and CRIU need ---
+disable CONFIG_ARM64_PTR_AUTH # CRIU 4.2.1 cannot query PAC on 5.10.29
 enable CONFIG_DEBUG_FS		# A1's probe interface
 enable CONFIG_CHECKPOINT_RESTORE # /proc/*/map_files, kcmp(), etc.
 enable CONFIG_MEM_SOFT_DIRTY	# incremental dump
@@ -115,8 +116,8 @@ enable CONFIG_VIRTIO_CONSOLE
 enable CONFIG_NET_9P
 enable CONFIG_NET_9P_VIRTIO
 enable CONFIG_9P_FS		# host directory passthrough
-enable CONFIG_SERIAL_8250
-enable CONFIG_SERIAL_8250_CONSOLE
+enable CONFIG_SERIAL_AMBA_PL011
+enable CONFIG_SERIAL_AMBA_PL011_CONSOLE
 enable CONFIG_TMPFS
 enable CONFIG_DEVTMPFS
 enable CONFIG_DEVTMPFS_MOUNT
@@ -131,15 +132,15 @@ disable CONFIG_DEBUG_INFO_BTF
 make -s olddefconfig
 
 echo ">>> Building with $JOBS jobs (first build: 20-40 min)"
-make -j"$JOBS" bzImage modules
+make ARCH=arm64 -j"$JOBS" Image modules
 
 echo ">>> Building initramfs (fallback for run-qemu.sh when virtme-ng is absent)"
 IRD="$KROOT/initramfs-$VERSION"
 rm -rf "$IRD"
 mkdir -p "$IRD"/{bin,sbin,proc,sys,dev,tmp,mnt,root}
 cp "$(command -v busybox)" "$IRD/bin/busybox"
-( cd "$IRD/bin" && for a in sh ls cat mount umount insmod rmmod dmesg \
-	sleep kill ps grep mkdir echo cp mv rm chmod dd; do ln -sf busybox "$a"; done )
+( cd "$IRD/bin" && for a in sh ls cat mount umount mountpoint insmod rmmod dmesg \
+	sleep kill ps grep mkdir echo cp mv rm chmod dd id tail uname poweroff; do ln -sf busybox "$a"; done )
 cat > "$IRD/init" <<'INIT'
 #!/bin/sh
 mount -t proc  proc  /proc
@@ -151,8 +152,10 @@ mkdir -p /mnt/host
 mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/host 2>/dev/null
 echo "=== guest up: $(uname -r) ==="
 if [ -x /mnt/host/guest-script.sh ]; then
+	echo "=== running guest script ==="
 	/mnt/host/guest-script.sh
-	echo "=== guest script done, powering off ==="
+	rc=$?
+	echo "=== guest script exit: $rc; powering off ==="
 	poweroff -f
 else
 	exec /bin/sh
@@ -164,7 +167,7 @@ chmod +x "$IRD/init"
 
 echo
 echo ">>> Done."
-echo "    kernel:    $KDIR/arch/x86/boot/bzImage"
+echo "    kernel:    $KDIR/arch/arm64/boot/Image"
 echo "    vmlinux:   $KDIR/vmlinux   (feed this to gdb)"
 echo "    initramfs: $KROOT/initramfs-$VERSION.cpio.gz"
 echo
