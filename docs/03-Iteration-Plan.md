@@ -58,7 +58,35 @@ QEMU/virtme-ng、GitHub Actions、CRIU 的 `crit` 与 ZDTM 测试套件。
 
 | 步骤 | 名称 | 工期 | 产出 | 文件 |
 |---|---|---|---|---|
-| **S0** | 可行性打靶(代码可丢弃) | 1 周 | 「什么能用/不能用」结论表 | [S0](steps/S0-feasibility-spike.md) |
+| **S0** | 可行性打靶(已完成) | 1 周 | 「什么能用/不能用」结论表 | [S0](steps/S0-feasibility-spike.md) |
+
+### S0 实测后的执行边界
+
+S0 已在 `Linux 5.10.29/aarch64`、`CONFIG_ARM64_PTR_AUTH` 未设置的实际 QEMU
+环境中完成。总体双轨架构、A3 门禁和依赖图保持不变，但后续实现必须遵守以下
+实测边界：
+
+- A 轨获取目标 task 使用 `find_vpid()` + `get_pid_task()` /
+  `put_task_struct()`，或在 RCU 保护下使用 `pid_task()`；禁止依赖未导出的
+  `find_get_task_by_vpid()`，也不能省略 RCU 保护。
+- A 轨地址空间使用 `get_task_mm()`、`mmap_read_lock()` 和 5.10 的
+  `mm->mmap`/`vm_next` 链表。A1 的 VMA 对照必须继续以 `/proc/PID/maps` 为
+  外部基准，并保持 5.10.29 版本锁定。
+- A 轨页读取优先采用已验证的 `access_process_vm()`；需要 `struct page *` 时
+  使用已验证的 `get_user_pages_remote()`。两者都必须先判断页是否应被读取，
+  不能把 `FOLL_FORCE` 对 `PROT_NONE` 页的可读结果误认为普通可访问页。
+- A3 不再设计模块内创建 task 或安装目标 task 的新地址空间：`mm_alloc()`、
+  `vm_area_alloc()`、`insert_vm_struct()`、`do_mmap()`、`do_munmap()`、
+  `alloc_pid()` 和 `kernel_execve()` 均无法从外置模块链接。`vm_mmap()`/
+  `vm_munmap()` 虽可链接，但只作用于 `current->mm`，不是目标 task 的替代品。
+- `vm_insert_page()` 不得用于普通匿名 VMA 的 restore；S0 证明它即使返回 0
+  也会设置 `VM_MIXEDMAP` 并改变 VMA 语义。因此 restore 的地址空间切换、PID
+  安装和最后一跳全部归入 B1 用户态实现，A 轨只负责 dump。
+
+这意味着计划的主要调整是实现边界，不是重排阶段：先完成 A1/A2，再以真实
+`criu restore` 通过作为 A3 门禁；B1/B2 可继续与 A 轨并行，且 B1 是唯一的
+mini-restore 落点。S0 的完整实测记录和配置 hash 见
+`docs/principles/08-kernel-module-limits.md` 的实验复核一节。
 
 ### A 轨 —— 内核模块 dump(验证器:真 criu restore)
 
