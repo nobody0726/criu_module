@@ -22,10 +22,17 @@ kernel_release=unknown
 if [ ! -d "$KDIR" ]; then
 	env_mismatch "KDIR does not exist: ${KDIR}"
 else
-	kernel_release=$(make -s -C "$KDIR" kernelrelease 2>/dev/null | awk 'NF { value = $0 } END { print value }')
-	if [ -z "$kernel_release" ]; then
+	kernelrelease_output=$(make -s -C "$KDIR" kernelrelease 2>/dev/null)
+	make_status=$?
+	if [ "$make_status" -ne 0 ]; then
+		env_mismatch "make kernelrelease failed in ${KDIR} (status ${make_status})"
+		kernel_release=unknown
+	else
+		kernel_release=$(printf '%s\n' "$kernelrelease_output" | awk 'NF { value = $0 } END { print value }')
+	fi
+	if [ "$make_status" -eq 0 ] && [ -z "$kernel_release" ]; then
 		env_mismatch "could not read kernel release from ${KDIR}"
-	elif [ "$kernel_release" != 5.10.29 ]; then
+	elif [ "$make_status" -eq 0 ] && [ "$kernel_release" != 5.10.29 ]; then
 		env_mismatch "kernel release is ${kernel_release}, expected 5.10.29"
 	fi
 fi
@@ -66,13 +73,12 @@ else
 	done
 
 	ptr_auth_status=$(config_value CONFIG_ARM64_PTR_AUTH)
-	case "$ptr_auth_status" in
-		unset)
-			;;
-		*)
-			env_mismatch "CONFIG_ARM64_PTR_AUTH is ${ptr_auth_status}, expected unset"
-			;;
-	esac
+	ptr_auth_unset_lines=$(awk '$0 == "# CONFIG_ARM64_PTR_AUTH is not set" { count++ } END { print count + 0 }' "$config_file")
+	if [ "$ptr_auth_unset_lines" -lt 1 ]; then
+		env_mismatch 'CONFIG_ARM64_PTR_AUTH must have an explicit unset line'
+	elif [ "$ptr_auth_status" != unset ]; then
+		env_mismatch "CONFIG_ARM64_PTR_AUTH is ${ptr_auth_status}, expected unset"
+	fi
 fi
 
 if [ "$mismatch" -ne 0 ]; then
@@ -84,11 +90,29 @@ hash_input=$(awk '
 	/^# CONFIG_[A-Za-z0-9_]+ is not set$/{ print }
 ' "$config_file" | LC_ALL=C sort)
 if command -v sha256sum >/dev/null 2>&1; then
-	config_hash=$(printf '%s\n' "$hash_input" | sha256sum | awk '{ print $1 }')
+	hash_output=$(printf '%s\n' "$hash_input" | sha256sum)
+	hash_status=$?
 elif command -v shasum >/dev/null 2>&1; then
-	config_hash=$(printf '%s\n' "$hash_input" | shasum -a 256 | awk '{ print $1 }')
+	hash_output=$(printf '%s\n' "$hash_input" | shasum -a 256)
+	hash_status=$?
 else
 	env_mismatch 'neither sha256sum nor shasum is available'
+	exit 1
+fi
+
+if [ "$hash_status" -ne 0 ]; then
+	env_mismatch "config hash command failed (status ${hash_status})"
+	exit 1
+fi
+config_hash=$(printf '%s\n' "$hash_output" | awk 'NF { print $1; exit }')
+case "$config_hash" in
+	''|*[!0123456789abcdefABCDEF]*)
+		env_mismatch 'config hash is not a hexadecimal digest'
+		exit 1
+		;;
+esac
+if [ "${#config_hash}" -ne 64 ]; then
+	env_mismatch "config hash has length ${#config_hash}, expected 64"
 	exit 1
 fi
 
