@@ -3,6 +3,8 @@
 #include <linux/err.h>
 #include <linux/highmem.h>
 #include <linux/init.h>
+#include <linux/binfmts.h>
+#include <linux/mman.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -147,6 +149,7 @@ static void criu_spike_prepare_output(void)
 #include "probes/task.c"
 #include "probes/mm.c"
 #include "probes/pages.c"
+#include "probes/restore.c"
 
 static int criu_spike_status_show(struct seq_file *m, void *unused)
 {
@@ -202,6 +205,12 @@ static int __init criu_spike_init(void)
 		goto fail;
 #endif
 
+	if (criu_spike_restore_compile_selected()) {
+		ret = criu_spike_run_restore_compile_probe();
+		if (ret)
+			goto fail;
+	}
+
 	criu_spike_prepare_output();
 	if (criu_spike_task_probe_selected()) {
 		ret = criu_spike_run_task_probe();
@@ -215,6 +224,11 @@ static int __init criu_spike_init(void)
 	}
 	if (criu_spike_page_probe_selected()) {
 		ret = criu_spike_run_page_probe();
+		if (ret)
+			goto fail;
+	}
+	if (criu_spike_restore_probe_selected()) {
+		ret = criu_spike_run_restore_probe();
 		if (ret)
 			goto fail;
 	}

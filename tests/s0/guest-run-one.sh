@@ -304,6 +304,9 @@ case "$PROBE" in
 1.4)
 	EXPECTED_RESULT=UNSAFE
 	;;
+4.8)
+	EXPECTED_RESULT=UNSAFE
+	;;
 *)
 	fail CRASH "runtime runner does not implement probe $PROBE"
 	;;
@@ -421,10 +424,31 @@ case "$PROBE" in
 	grep -Eq '^access_guard_ret=-?[0-9]+$' "$OUT_DIR/report" || \
 		fail WRONG-VALUE "PROT_NONE access result is missing"
 	;;
-esac
+4.8)
+	grep -q '^insert_ret=0$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "vm_insert_page did not insert the page"
+	grep -q '^vm_mixedmap_added=1$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "VM_MIXEDMAP side effect was not observed"
+	grep -Eq '^flags_before=0x[0-9a-f]+$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "VMA flags before insertion are missing"
+	grep -Eq '^flags_after=0x[0-9a-f]+$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "VMA flags after insertion are missing"
+	esac
 
 cat "/proc/$TARGET_PID/maps" > "$OUT_DIR/maps-after" || fail CRASH "cannot save post-probe maps"
 cat "/proc/$TARGET_PID/smaps" > "$OUT_DIR/smaps-after" || fail CRASH "cannot save post-probe smaps"
+
+if [ "$PROBE" = "4.8" ]; then
+	if cmp -s "$OUT_DIR/smaps-before" "$OUT_DIR/smaps-after"; then
+		SMAPS_DELTA=unchanged
+	else
+		SMAPS_DELTA=changed
+	fi
+	printf 'smaps_delta=%s\n' "$SMAPS_DELTA" > "$OUT_DIR/smaps-delta" || \
+		fail CRASH "cannot save smaps delta"
+	printf 'smaps_delta=%s\n' "$SMAPS_DELTA" >> "$OUT_DIR/report" || \
+		fail CRASH "cannot append smaps delta"
+fi
 
 FINAL_STATUS=$EXPECTED_RESULT
 FINAL_RC=0
