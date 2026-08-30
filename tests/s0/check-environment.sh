@@ -29,10 +29,15 @@ else
 		kernel_release=unknown
 	else
 		kernel_release=$(printf '%s\n' "$kernelrelease_output" | awk 'NF { value = $0 } END { print value }')
+		kernelrelease_parse_status=$?
+		if [ "$kernelrelease_parse_status" -ne 0 ]; then
+			env_mismatch "kernel release parsing failed (status ${kernelrelease_parse_status})"
+			kernel_release=unknown
+		fi
 	fi
-	if [ "$make_status" -eq 0 ] && [ -z "$kernel_release" ]; then
+	if [ "$make_status" -eq 0 ] && [ "$kernelrelease_parse_status" -eq 0 ] && [ -z "$kernel_release" ]; then
 		env_mismatch "could not read kernel release from ${KDIR}"
-	elif [ "$make_status" -eq 0 ] && [ "$kernel_release" != 5.10.29 ]; then
+	elif [ "$make_status" -eq 0 ] && [ "$kernelrelease_parse_status" -eq 0 ] && [ "$kernel_release" != 5.10.29 ]; then
 		env_mismatch "kernel release is ${kernel_release}, expected 5.10.29"
 	fi
 fi
@@ -54,6 +59,8 @@ config_value()
 
 if [ ! -f "$config_file" ]; then
 	env_mismatch "kernel config does not exist: ${config_file}"
+elif [ ! -r "$config_file" ]; then
+	env_mismatch "kernel config is not readable: ${config_file}"
 else
 	for config_name in \
 		CONFIG_MODULES \
@@ -67,17 +74,31 @@ else
 		CONFIG_9P_FS
 	do
 		config_status=$(config_value "$config_name")
+		config_parse_status=$?
+		if [ "$config_parse_status" -ne 0 ]; then
+			env_mismatch "config parsing failed for ${config_name} (status ${config_parse_status})"
+			continue
+		fi
 		if [ "$config_status" != y ]; then
 			env_mismatch "${config_name} is ${config_status}, expected y"
 		fi
 	done
 
 	ptr_auth_status=$(config_value CONFIG_ARM64_PTR_AUTH)
+	config_parse_status=$?
 	ptr_auth_unset_lines=$(awk '$0 == "# CONFIG_ARM64_PTR_AUTH is not set" { count++ } END { print count + 0 }' "$config_file")
-	if [ "$ptr_auth_unset_lines" -lt 1 ]; then
-		env_mismatch 'CONFIG_ARM64_PTR_AUTH must have an explicit unset line'
-	elif [ "$ptr_auth_status" != unset ]; then
-		env_mismatch "CONFIG_ARM64_PTR_AUTH is ${ptr_auth_status}, expected unset"
+	ptr_auth_parse_status=$?
+	if [ "$config_parse_status" -ne 0 ]; then
+		env_mismatch "config parsing failed for CONFIG_ARM64_PTR_AUTH (status ${config_parse_status})"
+	fi
+	if [ "$ptr_auth_parse_status" -ne 0 ]; then
+		env_mismatch "config parsing failed for CONFIG_ARM64_PTR_AUTH unset line (status ${ptr_auth_parse_status})"
+	else
+		if [ "$ptr_auth_unset_lines" -lt 1 ]; then
+			env_mismatch 'CONFIG_ARM64_PTR_AUTH must have an explicit unset line'
+		elif [ "$ptr_auth_status" != unset ]; then
+			env_mismatch "CONFIG_ARM64_PTR_AUTH is ${ptr_auth_status}, expected unset"
+		fi
 	fi
 fi
 
@@ -88,7 +109,18 @@ fi
 hash_input=$(awk '
 	/^CONFIG_[A-Za-z0-9_]+=/{ print }
 	/^# CONFIG_[A-Za-z0-9_]+ is not set$/{ print }
-' "$config_file" | LC_ALL=C sort)
+ ' "$config_file")
+awk_status=$?
+if [ "$awk_status" -ne 0 ]; then
+	env_mismatch "config parsing failed (status ${awk_status})"
+	exit 1
+fi
+hash_input=$(printf '%s\n' "$hash_input" | LC_ALL=C sort)
+sort_status=$?
+if [ "$sort_status" -ne 0 ]; then
+	env_mismatch "config hash input sort failed (status ${sort_status})"
+	exit 1
+fi
 if command -v sha256sum >/dev/null 2>&1; then
 	hash_output=$(printf '%s\n' "$hash_input" | sha256sum)
 	hash_status=$?
@@ -105,6 +137,11 @@ if [ "$hash_status" -ne 0 ]; then
 	exit 1
 fi
 config_hash=$(printf '%s\n' "$hash_output" | awk 'NF { print $1; exit }')
+hash_parse_status=$?
+if [ "$hash_parse_status" -ne 0 ]; then
+	env_mismatch "config hash parsing failed (status ${hash_parse_status})"
+	exit 1
+fi
 case "$config_hash" in
 	''|*[!0123456789abcdefABCDEF]*)
 		env_mismatch 'config hash is not a hexadecimal digest'

@@ -22,14 +22,20 @@ do
 		printf 'SOURCE-MISMATCH: required scan directory does not exist: %s\n' "$LINUX_SRC/$scan_dir" >&2
 		exit 1
 	fi
+	if [ ! -r "$scan_dir" ] || [ ! -x "$scan_dir" ]; then
+		printf 'SOURCE-MISMATCH: required scan directory is not readable: %s\n' "$LINUX_SRC/$scan_dir" >&2
+		exit 1
+	fi
 done
+
+rg_field_separator=$(printf '\037')
 
 function_targets='find_get_task_by_vpid|find_vpid|pid_task|get_pid_task|put_task_struct|get_task_mm|mmput|mmget_not_zero|mmap_read_lock|d_path|follow_page|get_user_pages_remote|access_process_vm|mm_alloc|vm_area_alloc|insert_vm_struct|do_mmap|vm_mmap|do_munmap|vm_munmap|alloc_pid|kernel_execve|vm_insert_page'
 field_targets='vm_next|vm_file'
 all_targets="${function_targets}|${field_targets}"
 scan_rg()
 {
-	rg -n -H --glob '*.[ch]' -e "$1" $scan_dirs
+	rg -n -H --field-match-separator="$rg_field_separator" --glob '*.[ch]' -e "$1" $scan_dirs
 	rg_status=$?
 	case "$rg_status" in
 		0|1)
@@ -41,13 +47,28 @@ scan_rg()
 	esac
 }
 
+sort_matches()
+{
+	sorted_matches=$(printf '%s\n' "$1" | LC_ALL=C sort -u)
+	sort_status=$?
+	if [ "$sort_status" -ne 0 ]; then
+		return "$sort_status"
+	fi
+	printf '%s' "$sorted_matches"
+}
+
 function_matches=$(scan_rg "(^|[^[:alnum:]_])(${function_targets})[[:space:]]*\\(")
 scan_status=$?
 if [ "$scan_status" -ne 0 ]; then
 	printf 'SOURCE-MISMATCH: function scan failed (status %s)\n' "$scan_status" >&2
 	exit 1
 fi
-function_matches=$(printf '%s\n' "$function_matches" | LC_ALL=C sort -u)
+function_matches=$(sort_matches "$function_matches")
+sort_status=$?
+if [ "$sort_status" -ne 0 ]; then
+	printf 'SOURCE-MISMATCH: function match sort failed (status %s)\n' "$sort_status" >&2
+	exit 1
+fi
 
 field_matches=$(scan_rg "(^|[^[:alnum:]_])(${field_targets})[[:space:]]*[,;]")
 scan_status=$?
@@ -55,7 +76,12 @@ if [ "$scan_status" -ne 0 ]; then
 	printf 'SOURCE-MISMATCH: field scan failed (status %s)\n' "$scan_status" >&2
 	exit 1
 fi
-field_matches=$(printf '%s\n' "$field_matches" | LC_ALL=C sort -u)
+field_matches=$(sort_matches "$field_matches")
+sort_status=$?
+if [ "$sort_status" -ne 0 ]; then
+	printf 'SOURCE-MISMATCH: field match sort failed (status %s)\n' "$sort_status" >&2
+	exit 1
+fi
 
 export_matches=$(scan_rg "^[[:space:]]*EXPORT_SYMBOL(_GPL)?\\((${all_targets})\\)[[:space:]]*;")
 scan_status=$?
@@ -63,17 +89,31 @@ if [ "$scan_status" -ne 0 ]; then
 	printf 'SOURCE-MISMATCH: export scan failed (status %s)\n' "$scan_status" >&2
 	exit 1
 fi
-export_matches=$(printf '%s\n' "$export_matches" | LC_ALL=C sort -u)
+export_matches=$(sort_matches "$export_matches")
+sort_status=$?
+if [ "$sort_status" -ne 0 ]; then
+	printf 'SOURCE-MISMATCH: export match sort failed (status %s)\n' "$sort_status" >&2
+	exit 1
+fi
 
 function_declaration()
 {
 	name=$1
-	declaration=$(printf '%s\n' "$function_matches" | awk -F: -v name="$name" '
+	declaration=$(printf '%s\n' "$function_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
+		function source_line(record, remainder, first_separator, second_separator) {
+			first_separator = index(record, separator)
+			if (first_separator == 0)
+				return ""
+			remainder = substr(record, first_separator + length(separator))
+			second_separator = index(remainder, separator)
+			if (second_separator == 0)
+				return ""
+			return substr(remainder, second_separator + length(separator))
+		}
 		BEGIN { function_re = "(^|[^[:alnum:]_])" name "[[:space:]]*[(]" }
 		{
 			path = $1
-			line = $0
-			sub(/^[^:]*:[0-9]+:/, "", line)
+			line = source_line($0)
 			sub(/^[[:space:]]+/, "", line)
 			if (line !~ function_re)
 				next
@@ -89,11 +129,20 @@ function_declaration()
 		}
 	')
 	if [ -z "$declaration" ]; then
-		declaration=$(printf '%s\n' "$function_matches" | awk -F: -v name="$name" '
+		declaration=$(printf '%s\n' "$function_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
+			function source_line(record, remainder, first_separator, second_separator) {
+				first_separator = index(record, separator)
+				if (first_separator == 0)
+					return ""
+				remainder = substr(record, first_separator + length(separator))
+				second_separator = index(remainder, separator)
+				if (second_separator == 0)
+					return ""
+				return substr(remainder, second_separator + length(separator))
+			}
 			BEGIN { function_re = "(^|[^[:alnum:]_])" name "[[:space:]]*[(]" }
 			{
-				line = $0
-				sub(/^[^:]*:[0-9]+:/, "", line)
+				line = source_line($0)
 				sub(/^[[:space:]]+/, "", line)
 				if (line ~ function_re && substr(line, 1, 1) != "/" &&
 				    substr(line, 1, 1) != "*") {
@@ -117,12 +166,21 @@ function_declaration()
 field_declaration()
 {
 	name=$1
-	declaration=$(printf '%s\n' "$field_matches" | awk -F: -v name="$name" '
+	declaration=$(printf '%s\n' "$field_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
+		function source_line(record, remainder, first_separator, second_separator) {
+			first_separator = index(record, separator)
+			if (first_separator == 0)
+				return ""
+			remainder = substr(record, first_separator + length(separator))
+			second_separator = index(remainder, separator)
+			if (second_separator == 0)
+				return ""
+			return substr(remainder, second_separator + length(separator))
+		}
 		BEGIN { field_re = "(^|[^[:alnum:]_])" name "[[:space:]]*[,;]" }
 		{
 			path = $1
-			line = $0
-			sub(/^[^:]*:[0-9]+:/, "", line)
+			line = source_line($0)
 			sub(/^[[:space:]]+/, "", line)
 			if (path == "include/linux/mm_types.h" && line ~ field_re &&
 			    substr(line, 1, 1) != "/" && substr(line, 1, 1) != "*") {
@@ -141,45 +199,64 @@ field_declaration()
 export_locations()
 {
 	name=$1
-	printf '%s\n' "$export_matches" | awk -F: -v name="$name" '
+	printf '%s\n' "$export_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
+			function source_line(record, remainder, first_separator, second_separator) {
+				first_separator = index(record, separator)
+				if (first_separator == 0)
+					return ""
+				remainder = substr(record, first_separator + length(separator))
+				second_separator = index(remainder, separator)
+				if (second_separator == 0)
+					return ""
+				return substr(remainder, second_separator + length(separator))
+			}
 			{
-				sub(/^\.\//, "", $1)
-				line = $0
-				sub(/^[^:]*:[0-9]+:/, "", line)
+				path = $1
+				sub(/^\.\//, "", path)
+				line = source_line($0)
 				if (index(line, "EXPORT_SYMBOL(" name ")") > 0 ||
 				    index(line, "EXPORT_SYMBOL_GPL(" name ")") > 0) {
-					print $1 ":" $2
+					print path ":" $2
 				}
 			}
 		' |
 		awk '
-			BEGIN { separator = "" }
+			BEGIN { join_separator = "" }
 			{
-				printf "%s%s", separator, $0
-				separator = ","
+				printf "%s%s", join_separator, $0
+				join_separator = ","
 			}
-			END { if (separator == "") printf "none" }
+			END { if (join_separator == "") printf "none" }
 		'
 }
 
 export_flavors()
 {
 	name=$1
-	printf '%s\n' "$export_matches" | awk -F: -v name="$name" '
-			BEGIN { separator = "" }
+	printf '%s\n' "$export_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
+			function source_line(record, remainder, first_separator, second_separator) {
+				first_separator = index(record, separator)
+				if (first_separator == 0)
+					return ""
+				remainder = substr(record, first_separator + length(separator))
+				second_separator = index(remainder, separator)
+				if (second_separator == 0)
+					return ""
+				return substr(remainder, second_separator + length(separator))
+			}
+			BEGIN { join_separator = "" }
 			{
-				line = $0
-				sub(/^[^:]*:[0-9]+:/, "", line)
+				line = source_line($0)
 				if (index(line, "EXPORT_SYMBOL_GPL(" name ")") > 0)
 					flavor = "EXPORT_SYMBOL_GPL"
 				else if (index(line, "EXPORT_SYMBOL(" name ")") > 0)
 					flavor = "EXPORT_SYMBOL"
 				else
 					next
-				printf "%s%s", separator, flavor
-				separator = ","
+				printf "%s%s", join_separator, flavor
+				join_separator = ","
 			}
-			END { if (separator == "") printf "none" }
+			END { if (join_separator == "") printf "none" }
 		'
 }
 
