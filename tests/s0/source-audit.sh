@@ -128,6 +128,10 @@ function_declaration()
 			}
 		}
 	')
+	awk_status=$?
+	if [ "$awk_status" -ne 0 ]; then
+		return "$awk_status"
+	fi
 	if [ -z "$declaration" ]; then
 		declaration=$(printf '%s\n' "$function_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
 			function source_line(record, remainder, first_separator, second_separator) {
@@ -155,6 +159,10 @@ function_declaration()
 				}
 			}
 		')
+		awk_status=$?
+		if [ "$awk_status" -ne 0 ]; then
+			return "$awk_status"
+		fi
 	fi
 	if [ -n "$declaration" ]; then
 		printf '%s' "$declaration"
@@ -189,6 +197,10 @@ field_declaration()
 			}
 		}
 	')
+	awk_status=$?
+	if [ "$awk_status" -ne 0 ]; then
+		return "$awk_status"
+	fi
 	if [ -n "$declaration" ]; then
 		printf '%s' "$declaration"
 	else
@@ -199,7 +211,7 @@ field_declaration()
 export_locations()
 {
 	name=$1
-	printf '%s\n' "$export_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
+	location_lines=$(printf '%s\n' "$export_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
 			function source_line(record, remainder, first_separator, second_separator) {
 				first_separator = index(record, separator)
 				if (first_separator == 0)
@@ -219,21 +231,30 @@ export_locations()
 					print path ":" $2
 				}
 			}
-		' |
-		awk '
-			BEGIN { join_separator = "" }
-			{
-				printf "%s%s", join_separator, $0
-				join_separator = ","
-			}
-			END { if (join_separator == "") printf "none" }
-		'
+		')
+	awk_status=$?
+	if [ "$awk_status" -ne 0 ]; then
+		return "$awk_status"
+	fi
+	joined_locations=$(printf '%s\n' "$location_lines" | awk '
+		BEGIN { join_separator = "" }
+		{
+			printf "%s%s", join_separator, $0
+			join_separator = ","
+		}
+		END { if (join_separator == "") printf "none" }
+	')
+	awk_status=$?
+	if [ "$awk_status" -ne 0 ]; then
+		return "$awk_status"
+	fi
+	printf '%s' "$joined_locations"
 }
 
 export_flavors()
 {
 	name=$1
-	printf '%s\n' "$export_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
+	flavor_lines=$(printf '%s\n' "$export_matches" | awk -F "$rg_field_separator" -v separator="$rg_field_separator" -v name="$name" '
 			function source_line(record, remainder, first_separator, second_separator) {
 				first_separator = index(record, separator)
 				if (first_separator == 0)
@@ -244,20 +265,25 @@ export_flavors()
 					return ""
 				return substr(remainder, second_separator + length(separator))
 			}
-			BEGIN { join_separator = "" }
-			{
-				line = source_line($0)
-				if (index(line, "EXPORT_SYMBOL_GPL(" name ")") > 0)
-					flavor = "EXPORT_SYMBOL_GPL"
-				else if (index(line, "EXPORT_SYMBOL(" name ")") > 0)
-					flavor = "EXPORT_SYMBOL"
-				else
-					next
-				printf "%s%s", join_separator, flavor
-				join_separator = ","
-			}
-			END { if (join_separator == "") printf "none" }
-		'
+		BEGIN { join_separator = "" }
+		{
+			line = source_line($0)
+			if (index(line, "EXPORT_SYMBOL_GPL(" name ")") > 0)
+				flavor = "EXPORT_SYMBOL_GPL"
+			else if (index(line, "EXPORT_SYMBOL(" name ")") > 0)
+				flavor = "EXPORT_SYMBOL"
+			else
+				next
+			printf "%s%s", join_separator, flavor
+			join_separator = ","
+		}
+		END { if (join_separator == "") printf "none" }
+	')
+	awk_status=$?
+	if [ "$awk_status" -ne 0 ]; then
+		return "$awk_status"
+	fi
+	printf '%s' "$flavor_lines"
 }
 
 scope_for()
@@ -318,13 +344,32 @@ do
 	case "$target" in
 		vm_next|vm_file)
 			declaration=$(field_declaration "$target")
+			parse_status=$?
 			;;
 		*)
 			declaration=$(function_declaration "$target")
+			parse_status=$?
 			;;
 	esac
+	if [ "$parse_status" -ne 0 ]; then
+		printf 'SOURCE-MISMATCH: declaration parse failed for %s (status %s)\n' \
+			"$target" "$parse_status" >&2
+		exit 1
+	fi
 	locations=$(export_locations "$target")
+	parse_status=$?
+	if [ "$parse_status" -ne 0 ]; then
+		printf 'SOURCE-MISMATCH: export location parse failed for %s (status %s)\n' \
+			"$target" "$parse_status" >&2
+		exit 1
+	fi
 	flavors=$(export_flavors "$target")
+	parse_status=$?
+	if [ "$parse_status" -ne 0 ]; then
+		printf 'SOURCE-MISMATCH: export flavor parse failed for %s (status %s)\n' \
+			"$target" "$parse_status" >&2
+		exit 1
+	fi
 	scope=$(scope_for "$target")
 	notes=$(notes_for "$target")
 	printf 'api=%s\tdeclaration=%s\texport=%s\texport_flavor=%s\tscope=%s\tnotes=%s\n' \
