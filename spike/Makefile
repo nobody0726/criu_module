@@ -14,6 +14,9 @@ endif
 
 # Keep the probe ID as text so IDs such as 4.4a remain lossless.
 ccflags-y += -DCRIU_SPIKE_PROBE=\"$(PROBE)\"
+ifeq ($(PROBE),1.1)
+ccflags-y += -DCRIU_SPIKE_COMPILE_1_1
+endif
 
 .PHONY: all clean
 

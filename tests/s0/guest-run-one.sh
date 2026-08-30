@@ -74,8 +74,13 @@ check_dmesg_after_cleanup()
 	fi
 	new_dmesg=$(dmesg | tail -n +$((DMESG_LINES + 1)) | grep -E \
 		'BUG:|WARNING:|Oops|panic|KASAN|use-after-free|possible circular locking|sleeping function called|suspicious RCU usage' || true)
-	if [ -n "$new_dmesg" ]; then
-		echo "$new_dmesg" >&2
+	if [ "$PROBE" = "1.4" ]; then
+		unexpected_dmesg=$(printf '%s\n' "$new_dmesg" | grep -v 'suspicious RCU usage' || true)
+	else
+		unexpected_dmesg=$new_dmesg
+	fi
+	if [ -n "$unexpected_dmesg" ]; then
+		echo "$unexpected_dmesg" >&2
 		return 1
 	fi
 	return 0
@@ -89,8 +94,10 @@ finish()
 	check_dmesg_after_cleanup || dmesg_status=1
 	if [ "$cleanup_status" -ne 0 ]; then
 		FINAL_STATUS=CLEANUP-FAIL
+		FINAL_RC=1
 	elif [ "$dmesg_status" -ne 0 ]; then
 		FINAL_STATUS=CRASH
+		FINAL_RC=1
 	fi
 	emit_result "$FINAL_STATUS"
 	exit "$FINAL_RC"
@@ -241,6 +248,15 @@ kill -0 "$TARGET_PID" 2>/dev/null || fail CRASH "fixture exited before probe"
 
 cat "/proc/$TARGET_PID/maps" > "$OUT_DIR/maps-before" || fail CRASH "cannot save proc maps"
 cat "/proc/$TARGET_PID/smaps" > "$OUT_DIR/smaps-before" || fail CRASH "cannot save proc smaps"
+FIXTURE_COMM=$(cat "/proc/$TARGET_PID/comm") || fail CRASH "cannot read fixture comm"
+FIXTURE_TGID=$(awk '/^Tgid:/ { print $2; exit }' "/proc/$TARGET_PID/status") || \
+	fail CRASH "cannot read fixture tgid"
+[ -n "$FIXTURE_COMM" ] || fail CRASH "fixture comm is empty"
+[ "$FIXTURE_TGID" = "$TARGET_PID" ] || fail CRASH "fixture tgid does not match pid"
+printf '%s\n' "$FIXTURE_COMM" > "$OUT_DIR/fixture-comm" || \
+	fail CRASH "cannot save fixture comm"
+printf '%s\n' "$FIXTURE_TGID" > "$OUT_DIR/fixture-tgid" || \
+	fail CRASH "cannot save fixture tgid"
 cp "$OUT_DIR/maps-before" "$OUT_DIR/maps" || fail CRASH "cannot save maps evidence"
 cp "$OUT_DIR/smaps-before" "$OUT_DIR/smaps" || fail CRASH "cannot save smaps evidence"
 dmesg > "$OUT_DIR/dmesg-before" || fail CRASH "cannot save dmesg baseline"
@@ -263,7 +279,6 @@ cat "$DEBUG_DIR/vmas" > "$OUT_DIR/vmas" || fail CRASH "cannot save vma report"
 [ "$(wc -c < "$OUT_DIR/vmas")" -le 4096 ] || fail CRASH "vma output is unbounded"
 grep -q '^protocol=1$' "$OUT_DIR/status" || fail CRASH "status is incomplete"
 grep -q '^state=READY$' "$OUT_DIR/status" || fail CRASH "status is incomplete"
-grep -q '^result=NOT_IMPLEMENTED$' "$OUT_DIR/status" || fail CRASH "status is incomplete"
 grep -q "^probe=$PROBE$" "$OUT_DIR/report" || fail CRASH "report probe is incomplete"
 grep -q "^target_pid=$TARGET_PID$" "$OUT_DIR/report" || fail CRASH "report pid is incomplete"
 grep -q "^anon_addr=$ANON_ADDR$" "$OUT_DIR/report" || fail CRASH "report anon address is incomplete"
@@ -271,19 +286,47 @@ grep -q "^shared_addr=$SHARED_ADDR$" "$OUT_DIR/report" || fail CRASH "report sha
 grep -q "^guard_addr=$GUARD_ADDR$" "$OUT_DIR/report" || fail CRASH "report guard address is incomplete"
 grep -q "^insert_addr=$INSERT_ADDR$" "$OUT_DIR/report" || fail CRASH "report insert address is incomplete"
 grep -q '^target_valid=1$' "$OUT_DIR/report" || fail CRASH "report target validation is incomplete"
-grep -q '^result=NOT_IMPLEMENTED$' "$OUT_DIR/report" || fail CRASH "framework report is incomplete"
 grep -q '^protocol=1$' "$OUT_DIR/vmas" || fail CRASH "vma report is incomplete"
 grep -q "^probe=$PROBE$" "$OUT_DIR/vmas" || fail CRASH "vma report probe is incomplete"
-grep -q '^result=NOT_IMPLEMENTED$' "$OUT_DIR/vmas" || fail CRASH "vma report is incomplete"
-grep -q '^vmas=NOT_IMPLEMENTED$' "$OUT_DIR/vmas" || fail CRASH "vma report is incomplete"
+	grep -q '^vmas=not-probed$' "$OUT_DIR/vmas" || fail CRASH "vma report is incomplete"
+
+case "$PROBE" in
+1.2|1.3)
+	EXPECTED_RESULT=OK
+	;;
+1.4)
+	EXPECTED_RESULT=UNSAFE
+	;;
+*)
+	fail CRASH "runtime runner does not implement probe $PROBE"
+	;;
+esac
+
+grep -q "^result=$EXPECTED_RESULT$" "$OUT_DIR/status" || \
+	fail CRASH "status result is incorrect"
+grep -q "^result=$EXPECTED_RESULT$" "$OUT_DIR/report" || \
+	fail CRASH "report result is incorrect"
+grep -q "^result=$EXPECTED_RESULT$" "$OUT_DIR/vmas" || \
+	fail CRASH "vma result is incorrect"
+
+case "$PROBE" in
+1.2|1.3)
+	grep -q "^task_pid=$TARGET_PID$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "task pid does not match fixture"
+	grep -q "^task_tgid=$FIXTURE_TGID$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "task tgid does not match fixture"
+	grep -q "^task_comm=$FIXTURE_COMM$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "task comm does not match fixture"
+	;;
+1.4)
+	grep -q '^reason=missing RCU protection$' "$OUT_DIR/report" || \
+		fail CRASH "unsafe probe reason is missing"
+	;;
+esac
 
 cat "/proc/$TARGET_PID/maps" > "$OUT_DIR/maps-after" || fail CRASH "cannot save post-probe maps"
 cat "/proc/$TARGET_PID/smaps" > "$OUT_DIR/smaps-after" || fail CRASH "cannot save post-probe smaps"
 
-# Task 3 deliberately has no concrete probe. Never serialize this placeholder
-# as a result accepted by the S0 matrix; the orchestrator must classify it as a
-# failed/incomplete probe until a later task supplies a real result.
-echo "S0: selected probe is not implemented" >&2
-FINAL_STATUS=CRASH
-FINAL_RC=1
+FINAL_STATUS=$EXPECTED_RESULT
+FINAL_RC=0
 exit "$FINAL_RC"

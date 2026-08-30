@@ -142,6 +142,8 @@ static void criu_spike_prepare_output(void)
 		  "vmas=NOT_IMPLEMENTED\n", criu_spike_args.probe);
 }
 
+#include "probes/task.c"
+
 static int criu_spike_status_show(struct seq_file *m, void *unused)
 {
 	seq_puts(m, criu_spike_status);
@@ -172,9 +174,24 @@ static int __init criu_spike_init(void)
 	if (ret)
 		return ret;
 
-	ret = criu_spike_prepare_resources();
+	if (!criu_spike_task_probe_selected()) {
+		ret = criu_spike_prepare_resources();
+		if (ret)
+			goto fail;
+	}
+
+#ifdef CRIU_SPIKE_COMPILE_1_1
+	ret = criu_spike_compile_1_1();
 	if (ret)
 		goto fail;
+#endif
+
+	criu_spike_prepare_output();
+	if (criu_spike_task_probe_selected()) {
+		ret = criu_spike_run_task_probe();
+		if (ret)
+			goto fail;
+	}
 
 	criu_spike_root = debugfs_create_dir("criu_spike", NULL);
 	if (IS_ERR_OR_NULL(criu_spike_root)) {
@@ -192,8 +209,6 @@ static int __init criu_spike_init(void)
 		ret = -ENOMEM;
 		goto fail;
 	}
-
-	criu_spike_prepare_output();
 
 	pr_info("criu_spike: framework loaded for probe %s\n",
 		criu_spike_args.probe);
