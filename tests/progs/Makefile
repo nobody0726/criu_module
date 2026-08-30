@@ -2,10 +2,7 @@ CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c11
 LDFLAGS ?=
 
-OS := $(shell uname -s)
-ifeq ($(OS),Linux)
 LDFLAGS += -static
-endif
 
 .PHONY: all clean
 
