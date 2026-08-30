@@ -298,7 +298,7 @@ case "$PROBE" in
 esac
 
 case "$PROBE" in
-1.2|1.3|2.2|2.3|2.4|2.5)
+1.2|1.3|2.2|2.3|2.4|2.5|3.2|3.3|3.4|3.5)
 	EXPECTED_RESULT=OK
 	;;
 1.4)
@@ -392,6 +392,34 @@ case "$PROBE" in
 	[ -n "$EXPECTED_FILE_PATH" ] || fail WRONG-VALUE "fixture file mapping is missing"
 	grep -Fqx "file_path=$EXPECTED_FILE_PATH" "$OUT_DIR/report" || \
 		fail WRONG-VALUE "d_path does not match proc maps"
+	;;
+3.2)
+	grep -q '^gup_ret=1$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "GUP did not pin one page"
+	grep -q '^gup_byte=0xa5$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "GUP read the wrong byte"
+	;;
+3.3)
+	grep -q '^access_anon_ret=1$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "access_process_vm private read failed"
+	grep -q '^access_anon_byte=0xa5$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "access_process_vm private byte is wrong"
+	grep -q '^access_shared_ret=1$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "access_process_vm shared read failed"
+	grep -q '^access_shared_byte=0x5a$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "access_process_vm shared byte is wrong"
+	;;
+3.4)
+	awk -F= '/^gup_unmapped_ret=/ { if ($2 <= 0) gup=1 }
+		 /^access_unmapped_ret=/ { if ($2 == 0) access=1 }
+		 END { exit !(gup && access) }' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "unmapped access did not return an error"
+	;;
+3.5)
+	grep -Eq '^gup_guard_ret=-?[0-9]+$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "PROT_NONE GUP result is missing"
+	grep -Eq '^access_guard_ret=-?[0-9]+$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "PROT_NONE access result is missing"
 	;;
 esac
 

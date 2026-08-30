@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/debugfs.h>
 #include <linux/err.h>
+#include <linux/highmem.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -145,6 +146,7 @@ static void criu_spike_prepare_output(void)
 
 #include "probes/task.c"
 #include "probes/mm.c"
+#include "probes/pages.c"
 
 static int criu_spike_status_show(struct seq_file *m, void *unused)
 {
@@ -194,6 +196,12 @@ static int __init criu_spike_init(void)
 		goto fail;
 #endif
 
+#ifdef CRIU_SPIKE_COMPILE_3_1
+	ret = criu_spike_compile_3_1();
+	if (ret)
+		goto fail;
+#endif
+
 	criu_spike_prepare_output();
 	if (criu_spike_task_probe_selected()) {
 		ret = criu_spike_run_task_probe();
@@ -202,6 +210,11 @@ static int __init criu_spike_init(void)
 	}
 	if (criu_spike_mm_probe_selected()) {
 		ret = criu_spike_run_mm_probe();
+		if (ret)
+			goto fail;
+	}
+	if (criu_spike_page_probe_selected()) {
+		ret = criu_spike_run_page_probe();
 		if (ret)
 			goto fail;
 	}
