@@ -67,7 +67,7 @@ else
 
 	ptr_auth_status=$(config_value CONFIG_ARM64_PTR_AUTH)
 	case "$ptr_auth_status" in
-		unset|missing)
+		unset)
 			;;
 		*)
 			env_mismatch "CONFIG_ARM64_PTR_AUTH is ${ptr_auth_status}, expected unset"

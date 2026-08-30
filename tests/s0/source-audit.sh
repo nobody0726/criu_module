@@ -31,11 +31,11 @@ function_declaration()
 			path = $1
 			line = $0
 			sub(/^[^:]*:[0-9]+:/, "", line)
+			sub(/^[[:space:]]+/, "", line)
 			if (line !~ function_re)
 				next
 			if (substr(path, 1, 8) == "include/" &&
-			    substr(line, 1, 1) != "*" &&
-			    substr(line, 1, 2) != "//") {
+			    substr(line, 1, 1) != "/" && substr(line, 1, 1) != "*") {
 				print path ":" $2
 				exit
 			}
@@ -47,7 +47,9 @@ function_declaration()
 			{
 				line = $0
 				sub(/^[^:]*:[0-9]+:/, "", line)
-				if (line ~ function_re) {
+				sub(/^[[:space:]]+/, "", line)
+				if (line ~ function_re && substr(line, 1, 1) != "/" &&
+				    substr(line, 1, 1) != "*") {
 					print $1 ":" $2
 					exit
 				}
@@ -70,7 +72,9 @@ field_declaration()
 			path = $1
 			line = $0
 			sub(/^[^:]*:[0-9]+:/, "", line)
-			if (path == "include/linux/mm_types.h" && line ~ field_re) {
+			sub(/^[[:space:]]+/, "", line)
+			if (path == "include/linux/mm_types.h" && line ~ field_re &&
+			    substr(line, 1, 1) != "/" && substr(line, 1, 1) != "*") {
 				print path ":" $2
 				exit
 			}
@@ -144,7 +148,7 @@ scope_for()
 			printf 'MMU+NOMMU'
 			;;
 		*)
-			printf 'generic'
+			printf 'MMU+NOMMU'
 			;;
 	esac
 }
@@ -171,7 +175,7 @@ notes_for()
 			printf 'vm_area_struct field; MMU and NOMMU implementations use configuration-dependent VMA layouts'
 			;;
 		*)
-			printf 'declaration/export inspected in the Linux 5.10.29 source tree'
+			printf 'MMU: common kernel API declaration/export inspected; NOMMU: common kernel API declaration/export inspected'
 			;;
 	esac
 }
