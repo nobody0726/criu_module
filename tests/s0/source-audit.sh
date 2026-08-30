@@ -8,8 +8,8 @@ if [ ! -d "$LINUX_SRC" ]; then
 	printf 'SOURCE-MISMATCH: source tree does not exist: %s\n' "$LINUX_SRC" >&2
 	exit 1
 fi
-if ! command -v rg >/dev/null 2>&1; then
-	printf 'SOURCE-MISMATCH: rg is required for the read-only source audit\n' >&2
+if ! command -v rg >/dev/null 2>&1 && ! command -v grep >/dev/null 2>&1; then
+	printf 'SOURCE-MISMATCH: rg or grep is required for the read-only source audit\n' >&2
 	exit 1
 fi
 
@@ -35,16 +35,32 @@ field_targets='vm_next|vm_file'
 all_targets="${function_targets}|${field_targets}"
 scan_rg()
 {
-	rg -n -H --field-match-separator="$rg_field_separator" --glob '*.[ch]' -e "$1" $scan_dirs
-	rg_status=$?
-	case "$rg_status" in
-		0|1)
-			return 0
-			;;
-		*)
-			return "$rg_status"
-			;;
+	if command -v rg >/dev/null 2>&1; then
+		rg -n -H --field-match-separator="$rg_field_separator" --glob '*.[ch]' -e "$1" $scan_dirs
+		rg_status=$?
+		case "$rg_status" in
+			0|1) return 0 ;;
+			*) return "$rg_status" ;;
+		esac
+	fi
+
+	# Keep the same path/line/text record shape when ripgrep is unavailable.
+	grep_matches=$(grep -R -n -H -E --include='*.c' --include='*.h' -e "$1" $scan_dirs)
+	grep_status=$?
+	case "$grep_status" in
+		0|1) ;;
+		*) return "$grep_status" ;;
 	esac
+	printf '%s\n' "$grep_matches" |
+	awk -F: -v separator="$rg_field_separator" '
+	{
+		first = index($0, ":")
+		remainder = substr($0, first + 1)
+		second = index(remainder, ":")
+		if (first && second)
+			print substr($0, 1, first - 1) separator substr(remainder, 1, second - 1) separator substr(remainder, second + 1)
+	}'
+	return 0
 }
 
 sort_matches()
