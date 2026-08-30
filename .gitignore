@@ -8,3 +8,8 @@ kernel_module/*.mod.c
 kernel_module/Module.symvers
 kernel_module/modules.order
 kernel_module/.*.cmd
+
+# S0 evidence and transient probe outputs.
+artifacts/s0/
+tests/s0/.s0-*
+tests/s0/*.tmp
