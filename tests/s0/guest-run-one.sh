@@ -127,7 +127,7 @@ BEGIN {
 	spec["1.2"] = "1\truntime\tpid_task/find_vpid\tOK\tyes\tpid"
 	spec["1.3"] = "1\truntime\tget_pid_task/put_task_struct\tOK\tyes\tpid"
 	spec["1.4"] = "1\truntime\tpid_task/find_vpid (without RCU)\tUNSAFE\tno\tpid"
-	spec["2.1"] = "2\tcompile\tmmget_not_zero\tNO-SYMBOL\tno\tnone"
+	spec["2.1"] = "2\tcompile\tmmget_not_zero\tOK\tno\tnone"
 	spec["2.2"] = "2\truntime\tget_task_mm/mmput\tOK\tyes\tpid"
 	spec["2.3"] = "2\truntime\tmmap_read_lock\tOK\tyes\tpid"
 	spec["2.4"] = "2\truntime\tmm->mmap/vm_next\tOK\tyes\tpid,anon,shared"
@@ -288,10 +288,17 @@ grep -q "^insert_addr=$INSERT_ADDR$" "$OUT_DIR/report" || fail CRASH "report ins
 grep -q '^target_valid=1$' "$OUT_DIR/report" || fail CRASH "report target validation is incomplete"
 grep -q '^protocol=1$' "$OUT_DIR/vmas" || fail CRASH "vma report is incomplete"
 grep -q "^probe=$PROBE$" "$OUT_DIR/vmas" || fail CRASH "vma report probe is incomplete"
+case "$PROBE" in
+2.4)
+	grep -q '^vma_count=' "$OUT_DIR/vmas" || fail CRASH "VMA count is missing"
+	;;
+*)
 	grep -q '^vmas=not-probed$' "$OUT_DIR/vmas" || fail CRASH "vma report is incomplete"
+	;;
+esac
 
 case "$PROBE" in
-1.2|1.3)
+1.2|1.3|2.2|2.3|2.4|2.5)
 	EXPECTED_RESULT=OK
 	;;
 1.4)
@@ -321,6 +328,70 @@ case "$PROBE" in
 1.4)
 	grep -q '^reason=missing RCU protection$' "$OUT_DIR/report" || \
 		fail CRASH "unsafe probe reason is missing"
+	;;
+2.2)
+	grep -q '^mm_nonnull=1$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "mm reference is missing"
+	awk -F= '/^mm_users=/ { if ($2 > 0) found=1 } END { exit !found }' \
+		"$OUT_DIR/report" || fail WRONG-VALUE "mm_users is not positive"
+	;;
+2.3)
+	grep -q '^mmap_lock_checked=1$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "mmap read lock check is missing"
+	;;
+2.4)
+	PROC_VMA_COUNT=$(wc -l < "$OUT_DIR/maps-before")
+	MODULE_VMA_COUNT=$(awk -F= '/^vma_count=/ { print $2; exit }' "$OUT_DIR/report")
+	[ "$MODULE_VMA_COUNT" = "$PROC_VMA_COUNT" ] || \
+		fail WRONG-VALUE "VMA count differs from proc maps"
+	find_map_line()
+	{
+		target=$(( $1 ))
+		while read -r range perms rest; do
+			start_hex=${range%-*}
+			end_hex=${range#*-}
+			start=$((0x$start_hex))
+			end=$((0x$end_hex))
+			if [ "$target" -ge "$start" ] && [ "$target" -lt "$end" ]; then
+				printf '%s %s\n' "$range" "$perms"
+				return 0
+			fi
+		done < "$OUT_DIR/maps-before"
+		return 1
+	}
+	ANON_MAP=$(find_map_line "$ANON_ADDR") || fail WRONG-VALUE "anon VMA is missing"
+	SHARED_MAP=$(find_map_line "$SHARED_ADDR") || fail WRONG-VALUE "shared VMA is missing"
+	ANON_RANGE=${ANON_MAP% *}
+	ANON_PERMS=${ANON_MAP#* }
+	SHARED_RANGE=${SHARED_MAP% *}
+	SHARED_PERMS=${SHARED_MAP#* }
+	ANON_START=0x${ANON_RANGE%-*}
+	ANON_END=0x${ANON_RANGE#*-}
+	SHARED_START=0x${SHARED_RANGE%-*}
+	SHARED_END=0x${SHARED_RANGE#*-}
+	grep -q "^anon_vma_start=$ANON_START$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "anon VMA start differs from proc maps"
+	grep -q "^anon_vma_end=$ANON_END$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "anon VMA end differs from proc maps"
+	grep -q "^anon_vma_perms=$ANON_PERMS$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "anon VMA permissions differ from proc maps"
+	grep -q "^shared_vma_start=$SHARED_START$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "shared VMA start differs from proc maps"
+	grep -q "^shared_vma_end=$SHARED_END$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "shared VMA end differs from proc maps"
+	grep -q "^shared_vma_perms=$SHARED_PERMS$" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "shared VMA permissions differ from proc maps"
+	grep -q '^anon_byte=0xa5$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "private anonymous magic byte is wrong"
+	grep -q '^shared_byte=0x5a$' "$OUT_DIR/report" || \
+		fail WRONG-VALUE "shared anonymous magic byte is wrong"
+	;;
+2.5)
+	EXPECTED_FILE_PATH=$(awk '$NF ~ /known-layout/ { print $NF; exit }' \
+		"$OUT_DIR/maps-before")
+	[ -n "$EXPECTED_FILE_PATH" ] || fail WRONG-VALUE "fixture file mapping is missing"
+	grep -Fqx "file_path=$EXPECTED_FILE_PATH" "$OUT_DIR/report" || \
+		fail WRONG-VALUE "d_path does not match proc maps"
 	;;
 esac
 

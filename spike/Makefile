@@ -17,6 +17,9 @@ ccflags-y += -DCRIU_SPIKE_PROBE=\"$(PROBE)\"
 ifeq ($(PROBE),1.1)
 ccflags-y += -DCRIU_SPIKE_COMPILE_1_1
 endif
+ifeq ($(PROBE),2.1)
+ccflags-y += -DCRIU_SPIKE_COMPILE_2_1
+endif
 
 .PHONY: all clean
 

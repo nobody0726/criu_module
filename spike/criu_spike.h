@@ -11,7 +11,7 @@
 #define CRIU_SPIKE_PROBE_LEN 8
 #define CRIU_SPIKE_STATUS_MAX 128
 #define CRIU_SPIKE_REPORT_MAX 1024
-#define CRIU_SPIKE_VMAS_MAX 256
+#define CRIU_SPIKE_VMAS_MAX 8192
 
 struct criu_spike_args {
 	int target_pid;

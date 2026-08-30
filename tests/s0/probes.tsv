@@ -3,7 +3,7 @@ id	group	kind	symbol	expected	gate	fixture
 1.2	1	runtime	pid_task/find_vpid	OK	yes	pid
 1.3	1	runtime	get_pid_task/put_task_struct	OK	yes	pid
 1.4	1	runtime	pid_task/find_vpid (without RCU)	UNSAFE	no	pid
-2.1	2	compile	mmget_not_zero	NO-SYMBOL	no	none
+2.1	2	compile	mmget_not_zero	OK	no	none
 2.2	2	runtime	get_task_mm/mmput	OK	yes	pid
 2.3	2	runtime	mmap_read_lock	OK	yes	pid
 2.4	2	runtime	mm->mmap/vm_next	OK	yes	pid,anon,shared

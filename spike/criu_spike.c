@@ -11,6 +11,7 @@
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <linux/uaccess.h>
 
 #include "criu_spike.h"
@@ -143,6 +144,7 @@ static void criu_spike_prepare_output(void)
 }
 
 #include "probes/task.c"
+#include "probes/mm.c"
 
 static int criu_spike_status_show(struct seq_file *m, void *unused)
 {
@@ -186,9 +188,20 @@ static int __init criu_spike_init(void)
 		goto fail;
 #endif
 
+#ifdef CRIU_SPIKE_COMPILE_2_1
+	ret = criu_spike_compile_2_1();
+	if (ret)
+		goto fail;
+#endif
+
 	criu_spike_prepare_output();
 	if (criu_spike_task_probe_selected()) {
 		ret = criu_spike_run_task_probe();
+		if (ret)
+			goto fail;
+	}
+	if (criu_spike_mm_probe_selected()) {
+		ret = criu_spike_run_mm_probe();
 		if (ret)
 			goto fail;
 	}
