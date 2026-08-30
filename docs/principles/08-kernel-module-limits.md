@@ -255,27 +255,57 @@ S0 会实验复核,但已有的 grep 结论值得先记在这里 —— 它们�
 > 这一节由 [S0](../steps/S0-feasibility-spike.md) 的实验结果填入。在 S0 完成前,
 > 上面所有「未导出」的结论都只有 grep 依据,**没有实验依据**。
 
+本次完整矩阵运行于 `2026-08-30`，内核为 `Linux 5.10.29/aarch64`。关键配置
+`CONFIG_MODULES=y`、`CONFIG_DEBUG_VM=y`、`CONFIG_DEBUG_VM_RB=y`、
+`CONFIG_PROVE_LOCKING=y`、`CONFIG_DEBUG_ATOMIC_SLEEP=y`、`CONFIG_DEBUG_LIST=y`、
+`CONFIG_DEBUG_FS=y`、`CONFIG_KASAN=y`、`CONFIG_9P_FS=y`，
+`CONFIG_ARM64_PTR_AUTH` 未设置；配置 hash 为
+`ff6ed83a5af7385fb3b3de30963a904cf9be63b7e5c0659ff59bf2ceb4becbf8`。
+完整证据目录为 `artifacts/s0/s0-full-20260830c/`，关键 probe 的三次重复证据
+及稳定 key 记录在 `artifacts/s0/s0-full-20260830c/repeat-summary.tsv`。
+
 | # | 待验证 | grep 结论 | 实验结论 | 环境 | 日期 |
 |---|---|---|---|---|---|
-| 1.2 | `pid_task(find_vpid(nr), PIDTYPE_PID)` | 待验 | | | |
-| 1.3 | `get_pid_task` / `put_task_struct` | 待验 | | | |
-| 1.4 | 不加 `rcu_read_lock()` 时 lockdep 是否报警 | —— | | | |
-| 2.2 | `get_task_mm` / `mmput` | `mmput` 已导出 | | | |
-| 2.3 | `mmap_read_lock(mm)` | inline,应可用 | | | |
-| 2.4 | `vma->vm_next` 遍历 vs `/proc/PID/maps` 行数 | 5.10 有 `vm_next` | | | |
-| 2.5 | `d_path()` 取 `vm_file` 路径 | 待验 | | | |
-| 3.2 | `get_user_pages_remote` | 已导出 | | | |
-| 3.3 | `access_process_vm` | 已导出 | | | |
-| 3.4 | 读未映射地址的行为 | —— | | | |
-| 3.5 | 读 `PROT_NONE` guard page 的行为 | —— | | | |
-| 4.1 | `mm_alloc` | 未导出 | | | |
-| 4.2 | `vm_area_alloc` | 未导出 | | | |
-| 4.3 | `insert_vm_struct` | 未导出 | | | |
-| 4.4 | `do_mmap` / `vm_mmap` | 前者未导出 | | | |
-| 4.5 | `do_munmap` / `vm_munmap` | 前者未导出 | | | |
-| 4.6 | `alloc_pid` | 未导出 | | | |
-| 4.7 | `kernel_execve` | 未导出 | | | |
-| 4.8 | `vm_insert_page` | 已导出但有副作用 | | | |
+| 1.1 | `find_get_task_by_vpid()` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `artifacts/s0/s0-full-20260830c/1.1` | 5.10.29/aarch64; cfg hash 如上 | 2026-08-30 |
+| 1.2 | `pid_task(find_vpid(nr), PIDTYPE_PID)` | 待验 | `OK`，PID/TGID/comm 与 fixture 一致；证据 `.../1.2`，重复 3/3 稳定 | 同上 | 2026-08-30 |
+| 1.3 | `get_pid_task` / `put_task_struct` | 待验 | `OK`，引用路径和卸载清理通过；证据 `.../1.3` | 同上 | 2026-08-30 |
+| 1.4 | 不加 `rcu_read_lock()` 时 lockdep 是否报警 | —— | `UNSAFE`，出现 `suspicious RCU usage`；证据 `.../1.4` | 同上 | 2026-08-30 |
+| 2.1 | `mmget_not_zero()` | inline | `OK`，5.10.29 中为 header `static inline`，模块构建成功；证据 `.../2.1` | 同上 | 2026-08-30 |
+| 2.2 | `get_task_mm` / `mmput` | `mmput` 已导出 | `OK`，`mm_nonnull=1` 且 `mm_users=2`；证据 `.../2.2` | 同上 | 2026-08-30 |
+| 2.3 | `mmap_read_lock(mm)` | inline,应可用 | `OK`，读锁上下文访问通过且无告警；证据 `.../2.3` | 同上 | 2026-08-30 |
+| 2.4 | `vma->vm_next` 遍历 vs `/proc/PID/maps` 行数 | 5.10 有 `vm_next` | `OK`，12 个 VMA、起止地址、权限及 `0xa5/0x5a` 全部一致；证据 `.../2.4`，重复 3/3（地址差异为 ASLR） | 同上 | 2026-08-30 |
+| 2.5 | `d_path()` 取 `vm_file` 路径 | 待验 | `OK`，路径与 `/proc/PID/maps` 一致；证据 `.../2.5` | 同上 | 2026-08-30 |
+| 3.1 | `follow_page()` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../3.1` | 同上 | 2026-08-30 |
+| 3.2 | `get_user_pages_remote` | 已导出 | `OK`，返回 1 页且读到 `0xa5`；证据 `.../3.2`，重复 3/3 稳定 | 同上 | 2026-08-30 |
+| 3.3 | `access_process_vm` | 已导出 | `OK`，私有页读到 `0xa5`、共享页读到 `0x5a`；证据 `.../3.3`，重复 3/3 稳定 | 同上 | 2026-08-30 |
+| 3.4 | 读未映射地址的行为 | —— | `OK`，GUP 返回 `-14`、`access_process_vm` 返回 0，且无异常；证据 `.../3.4` | 同上 | 2026-08-30 |
+| 3.5 | 读 `PROT_NONE` guard page 的行为 | —— | `OK`，GUP/access 行为可记录且无告警；证据 `.../3.5` | 同上 | 2026-08-30 |
+| 4.1 | `mm_alloc` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../4.1` | 同上 | 2026-08-30 |
+| 4.2 | `vm_area_alloc` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../4.2` | 同上 | 2026-08-30 |
+| 4.3 | `insert_vm_struct` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../4.3` | 同上 | 2026-08-30 |
+| 4.4a | `do_mmap` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../4.4a` | 同上 | 2026-08-30 |
+| 4.4b | `vm_mmap` | 已导出 wrapper | `OK`（可链接），但报告 scope 为 `current->mm`，不能操作目标 task 的 mm；证据 `.../4.4b` | 同上 | 2026-08-30 |
+| 4.5a | `do_munmap` | MMU 路径未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../4.5a` | 同上 | 2026-08-30 |
+| 4.5b | `vm_munmap` | 已导出 wrapper | `OK`（可链接），但报告 scope 为 `current->mm`，不能操作目标 task 的 mm；证据 `.../4.5b` | 同上 | 2026-08-30 |
+| 4.6 | `alloc_pid` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../4.6` | 同上 | 2026-08-30 |
+| 4.7 | `kernel_execve` | 未导出 | `NO-SYMBOL`，modpost 明确报告 undefined；证据 `.../4.7` | 同上 | 2026-08-30 |
+| 4.8 | `vm_insert_page` | 已导出但有副作用 | `UNSAFE`，返回 0 但 `VM_MIXEDMAP` 从 0 变 1，`smaps_delta=changed`；证据 `.../4.8`，重复 3/3 稳定 | 同上 | 2026-08-30 |
+
+`.../N` 表示本次完整运行目录下的 `N` 子目录。
+
+### 架构结论
+
+- A 轨的 task 获取可行：`find_vpid()` + `pid_task()`（RCU 保护）以及
+  `get_pid_task()`/`put_task_struct()` 均通过，优先采用带引用的路径。
+- A 轨的 `mm` 获取、VMA 遍历和用户页读取可行：`get_task_mm()`、
+  `mmap_read_lock()`、`vm_next` 遍历、`get_user_pages_remote()` 和
+  `access_process_vm()` 均通过；2.4 的 `/proc` 对照是核心门禁。
+- 模块不能直接复用 restore 所需的地址空间构造、PID 分配和 exec 内部路径：
+  4.1-4.3、4.4a、4.5a、4.6、4.7 均为 `NO-SYMBOL`；4.4b/4.5b 虽可链接，
+  但只能作用于 `current->mm`。
+- `vm_insert_page()` 不纳入 restore 方案：它会给普通匿名 VMA 设置
+  `VM_MIXEDMAP` 并改变后续内存语义。restore 继续放在用户态，由 task 自己
+  执行地址空间和进程构造步骤；内核模块仅承担已验证的观察和读取路径。
 
 **「环境」一栏要写内核版本和 `CONFIG_*` 关键选项**,因为第 1 节的第 4 类问题
 (字段偏移随配置变化)意味着一个结论只在一个配置下成立。
