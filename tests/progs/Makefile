@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -O2 -g -Wall -Wextra -Werror
 LDFLAGS = -static
-PROGRAMS = a1-layout a1-check many-vmas multithread-counter stopped-counter
+PROGRAMS = a1-layout a1-check many-vmas busy-counter multithread-counter stopped-counter
 
 .PHONY: all clean
 all: $(PROGRAMS)

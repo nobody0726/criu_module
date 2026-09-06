@@ -5,7 +5,9 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/seq_file.h>
+#include <linux/sched/task.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/uaccess.h>
 
 #include "criu_kernel.h"
@@ -212,6 +214,68 @@ static ssize_t target_write(struct file *file, const char __user *buf,
 	return ret ? ret : count;
 }
 
+static ssize_t freeze_write(struct file *file, const char __user *buf,
+			    size_t count, loff_t *pos)
+{
+	char input[16];
+	unsigned long value;
+	struct criu_freeze_ctx *ctx;
+	struct task_struct *target;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!count || count >= sizeof(input))
+		return -EINVAL;
+	if (copy_from_user(input, buf, count))
+		return -EFAULT;
+	input[count] = '\0';
+	ret = kstrtoul(input, 10, &value);
+	if (ret || value != 1)
+		return -EINVAL;
+	target = criu_target_get(NULL);
+	if (!target)
+		return -ESRCH;
+	ret = criu_freeze(task_pid_vnr(target), false, &ctx);
+	put_task_struct(target);
+	return ret ? ret : count;
+}
+
+static ssize_t thaw_write(struct file *file, const char __user *buf,
+			   size_t count, loff_t *pos)
+{
+	char input[16];
+	unsigned long value;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!count || count >= sizeof(input))
+		return -EINVAL;
+	if (copy_from_user(input, buf, count))
+		return -EFAULT;
+	input[count] = '\0';
+	ret = kstrtoul(input, 10, &value);
+	if (ret || value != 1)
+		return -EINVAL;
+	/*
+	 * The active context is deliberately owned by the module; a NULL
+	 * argument means "the current context" for this control operation.
+	 */
+	ret = criu_thaw(NULL);
+	return ret ? ret : count;
+}
+
+static const struct file_operations freeze_fops = {
+	.owner = THIS_MODULE,
+	.write = freeze_write,
+};
+
+static const struct file_operations thaw_fops = {
+	.owner = THIS_MODULE,
+	.write = thaw_write,
+};
+
 static ssize_t criu_view_read(struct file *file, char __user *buf,
 				      size_t size, loff_t *ppos)
 {
@@ -277,9 +341,21 @@ static const struct file_operations vmas_ext_fops = {
 
 static int criu_status_show(struct seq_file *m, void *unused)
 {
+	struct criu_freeze_status status;
+
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	seq_puts(m, "criu_kernel:ok\n");
+	if (criu_freeze_status(&status))
+		return -EIO;
+	seq_printf(m, "freeze_state=%s freeze_generation=%llu "
+		   "freeze_task_count=%u freeze_settled=%u "
+		   "freeze_was_stopped=%u freeze_last_error=%d "
+		   "freeze_cgroup_original=%s freeze_cgroup_temporary=%s\n",
+		   status.state, status.generation, status.task_count,
+		   status.settled, status.was_stopped, status.last_error,
+		   status.original_cgroup[0] ? status.original_cgroup : "unavailable",
+		   status.temporary_cgroup[0] ? status.temporary_cgroup : "unavailable");
 	return 0;
 }
 
@@ -321,6 +397,10 @@ static int __init criu_init(void)
 	}
 	if (!debugfs_create_file("target", 0600, criu_root, NULL,
 				&target_fops) ||
+	    !debugfs_create_file("freeze", 0200, criu_root, NULL,
+				 &freeze_fops) ||
+	    !debugfs_create_file("thaw", 0200, criu_root, NULL,
+				 &thaw_fops) ||
 	    !debugfs_create_file("task", 0400, criu_root, NULL, &task_fops) ||
 	    !debugfs_create_file("maps", 0400, criu_root, NULL, &maps_fops) ||
 	    !debugfs_create_file("vmas_ext", 0400, criu_root, NULL,
@@ -334,6 +414,7 @@ static int __init criu_init(void)
 
 static void __exit criu_exit(void)
 {
+	criu_thaw(NULL);
 	criu_target_clear();
 	debugfs_remove_recursive(criu_root);
 	pr_info("criu_kernel: unloaded\n");

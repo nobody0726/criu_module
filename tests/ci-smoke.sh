@@ -90,7 +90,7 @@ fi
 # A listed-but-missing script is a hard failure, not a skip: a gate that can
 # vanish silently is not a gate.
 # ---------------------------------------------------------------------------
-GATES="tests/compare/target-lifecycle.sh tests/compare/diff-maps.sh tests/compare/a1-error-paths.sh"
+GATES="tests/compare/target-lifecycle.sh tests/compare/diff-maps.sh tests/compare/a1-error-paths.sh tests/compare/freezer-symbols.sh tests/compare/freeze-test.sh tests/compare/freeze-stopped.sh tests/compare/freeze-errors.sh tests/compare/freeze-rollback.sh"
 
 for g in $GATES; do
 	[ -f "$g" ] || fail "gate script $g is listed but missing"

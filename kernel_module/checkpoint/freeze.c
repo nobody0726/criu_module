@@ -40,6 +40,7 @@ struct criu_freeze_task {
 static DEFINE_MUTEX(criu_freeze_lock);
 static struct criu_freeze_ctx *criu_freeze_current;
 static enum criu_freeze_state criu_freeze_current_state = CRIU_FREEZE_IDLE;
+static int criu_freeze_last_error;
 static unsigned int settle_timeout_ms = 5000;
 module_param(settle_timeout_ms, uint, 0644);
 
@@ -70,24 +71,61 @@ static void criu_freeze_release_tasks(struct criu_freeze_ctx *ctx)
 	ctx->task_count = 0;
 }
 
+static int criu_freeze_rollback_locked(struct criu_freeze_ctx *ctx)
+{
+	int ret;
+
+	ctx->state = CRIU_FREEZE_ROLLBACK;
+	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_ROLLBACK);
+	ret = ctx->cgroup_cookie ?
+		criu_cgroup_thaw_threadgroup(ctx->cgroup_cookie) : 0;
+	if (ret) {
+		criu_freeze_last_error = ret;
+		return ret;
+	}
+	criu_freeze_release_tasks(ctx);
+	if (ctx->target)
+		put_task_struct(ctx->target);
+	criu_freeze_current = NULL;
+	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_IDLE);
+	kfree(ctx);
+	return 0;
+}
+
+static const char *criu_freeze_state_name(enum criu_freeze_state state)
+{
+	switch (state) {
+	case CRIU_FREEZE_FREEZING:
+		return "freezing";
+	case CRIU_FREEZE_FROZEN_SETTLED:
+		return "frozen";
+	case CRIU_FREEZE_THAWING:
+		return "thawing";
+	case CRIU_FREEZE_ROLLBACK:
+		return "rollback";
+	default:
+		return "idle";
+	}
+}
+
 static int criu_freeze_capture_tasks(struct criu_freeze_ctx *ctx)
 {
 	struct task_struct *thread;
 	unsigned int count = 1, i = 0;
 	struct criu_freeze_task *tasks;
 
-	read_lock(&tasklist_lock);
+	rcu_read_lock();
 	for_each_thread(ctx->target, thread)
 		count++;
-	read_unlock(&tasklist_lock);
+	rcu_read_unlock();
 
 	tasks = kcalloc(count, sizeof(*tasks), GFP_KERNEL);
 	if (!tasks)
 		return -ENOMEM;
 
-	read_lock(&tasklist_lock);
+	rcu_read_lock();
 	if (ctx->target->flags & PF_EXITING) {
-		read_unlock(&tasklist_lock);
+		rcu_read_unlock();
 		kfree(tasks);
 		return -ESRCH;
 	}
@@ -105,7 +143,7 @@ static int criu_freeze_capture_tasks(struct criu_freeze_ctx *ctx)
 		get_task_struct(thread);
 		i++;
 	}
-	read_unlock(&tasklist_lock);
+	rcu_read_unlock();
 
 	if (i != count) {
 		while (i)
@@ -145,6 +183,7 @@ int criu_freeze(pid_t vpid, bool include_children,
 		return -EOPNOTSUPP;
 
 	mutex_lock(&criu_freeze_lock);
+	criu_freeze_last_error = 0;
 	if (criu_freeze_current) {
 		mutex_unlock(&criu_freeze_lock);
 		return -EBUSY;
@@ -170,6 +209,7 @@ int criu_freeze(pid_t vpid, bool include_children,
 		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_ROLLBACK);
 		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_IDLE);
 		kfree(new_ctx);
+		criu_freeze_last_error = -ESRCH;
 		mutex_unlock(&criu_freeze_lock);
 		return -ESRCH;
 	}
@@ -191,6 +231,7 @@ int criu_freeze(pid_t vpid, bool include_children,
 		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_ROLLBACK);
 		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_IDLE);
 		kfree(new_ctx);
+		criu_freeze_last_error = ret;
 		mutex_unlock(&criu_freeze_lock);
 		return ret;
 	}
@@ -207,6 +248,7 @@ int criu_freeze(pid_t vpid, bool include_children,
 		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_ROLLBACK);
 		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_IDLE);
 		kfree(new_ctx);
+		criu_freeze_last_error = ret;
 		mutex_unlock(&criu_freeze_lock);
 		return ret;
 	}
@@ -214,23 +256,31 @@ int criu_freeze(pid_t vpid, bool include_children,
 		unsigned long deadline = jiffies +
 			msecs_to_jiffies(settle_timeout_ms);
 
-		while (!criu_freeze_settled_locked(new_ctx)) {
+		while (settle_timeout_ms != 0 &&
+		       !criu_freeze_settled_locked(new_ctx)) {
 			if (time_after_eq(jiffies, deadline)) {
-				criu_cgroup_thaw_threadgroup(new_ctx->cgroup_cookie);
-				criu_freeze_release_tasks(new_ctx);
-				put_task_struct(target);
-				criu_freeze_current = NULL;
-				WRITE_ONCE(criu_freeze_current_state,
-					   CRIU_FREEZE_ROLLBACK);
-				WRITE_ONCE(criu_freeze_current_state,
-					   CRIU_FREEZE_IDLE);
-				kfree(new_ctx);
+				criu_freeze_last_error = -ETIMEDOUT;
+				ret = criu_freeze_rollback_locked(new_ctx);
+				if (ret) {
+					mutex_unlock(&criu_freeze_lock);
+					return ret;
+				}
 				mutex_unlock(&criu_freeze_lock);
 				return -ETIMEDOUT;
 			}
 			mutex_unlock(&criu_freeze_lock);
 			msleep(10);
 			mutex_lock(&criu_freeze_lock);
+		}
+		if (settle_timeout_ms == 0) {
+			criu_freeze_last_error = -ETIMEDOUT;
+			ret = criu_freeze_rollback_locked(new_ctx);
+			if (ret) {
+				mutex_unlock(&criu_freeze_lock);
+				return ret;
+			}
+			mutex_unlock(&criu_freeze_lock);
+			return -ETIMEDOUT;
 		}
 	}
 	new_ctx->state = CRIU_FREEZE_FROZEN_SETTLED;
@@ -240,21 +290,35 @@ int criu_freeze(pid_t vpid, bool include_children,
 	return 0;
 }
 
-void criu_thaw(struct criu_freeze_ctx *ctx)
+int criu_thaw(struct criu_freeze_ctx *ctx)
 {
-	if (!ctx)
-		return;
+	int ret;
 
 	mutex_lock(&criu_freeze_lock);
+	if (!ctx)
+		ctx = criu_freeze_current;
+	if (!ctx) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
 	if (ctx != criu_freeze_current) {
 		mutex_unlock(&criu_freeze_lock);
-		return;
+		return -ENOENT;
 	}
 
 	ctx->state = CRIU_FREEZE_THAWING;
 	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_THAWING);
 	if (ctx->cgroup_cookie)
-		criu_cgroup_thaw_threadgroup(ctx->cgroup_cookie);
+		ret = criu_cgroup_thaw_threadgroup(ctx->cgroup_cookie);
+	else
+		ret = 0;
+	if (ret) {
+		criu_freeze_last_error = ret;
+		ctx->state = CRIU_FREEZE_ROLLBACK;
+		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_ROLLBACK);
+		mutex_unlock(&criu_freeze_lock);
+		return ret;
+	}
 	criu_freeze_release_tasks(ctx);
 	if (ctx->target)
 		put_task_struct(ctx->target);
@@ -262,6 +326,7 @@ void criu_thaw(struct criu_freeze_ctx *ctx)
 	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_IDLE);
 	kfree(ctx);
 	mutex_unlock(&criu_freeze_lock);
+	return 0;
 }
 
 bool criu_freeze_settled(struct criu_freeze_ctx *ctx)
@@ -285,4 +350,32 @@ bool criu_freeze_settled(struct criu_freeze_ctx *ctx)
 	}
 	mutex_unlock(&criu_freeze_lock);
 	return settled;
+}
+
+int criu_freeze_status(struct criu_freeze_status *out)
+{
+	struct criu_freeze_ctx *ctx;
+	unsigned int i;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	mutex_lock(&criu_freeze_lock);
+	strscpy(out->state, criu_freeze_state_name(criu_freeze_current_state),
+		sizeof(out->state));
+	out->last_error = criu_freeze_last_error;
+	ctx = criu_freeze_current;
+	if (ctx) {
+		out->generation = ctx->target_generation;
+		out->task_count = ctx->task_count;
+		out->settled = ctx->state == CRIU_FREEZE_FROZEN_SETTLED;
+		for (i = 0; i < ctx->task_count; i++)
+			out->was_stopped |= ctx->tasks[i].stopped;
+		strscpy(out->original_cgroup, ctx->original_cgroup,
+			sizeof(out->original_cgroup));
+		strscpy(out->temporary_cgroup, ctx->temporary_cgroup,
+			sizeof(out->temporary_cgroup));
+	}
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
 }

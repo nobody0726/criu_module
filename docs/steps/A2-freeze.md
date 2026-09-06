@@ -2,6 +2,9 @@
 
 **工期:** 1 周 · **前置:** A1 · **产出:** 可靠冻结多线程进程,无信号丢失
 
+实现计划：[设计文档](../plans/2026-09-06-a2-freeze-design.md) ·
+[实现计划](../plans/2026-09-06-a2-freeze-implementation.md)
+
 > 相关原理:[02-freezing](../principles/02-freezing.md)
 
 ---
@@ -382,6 +385,8 @@ sh tests/compare/freeze-test.sh || exit 1
 
 - [ ] 12 个用例全部通过,含 5/6/7 三个难点
 - [ ] dmesg 干净(`DEBUG_ATOMIC_SLEEP` 尤其重要 —— freezer 路径里容易误睡眠)
-- [ ] `criu_freeze` / `criu_thaw` / `criu_freeze_settled` 接口冻结
+- [x] `criu_freeze` / `criu_thaw` / `criu_freeze_settled` 接口冻结
+- [x] debugfs `freeze` / `thaw` / `status` 控制面与回滚 gate
+- [ ] descendants/tree freezing（后续阶段）
 - [ ] 超时路径有测试覆盖,不是只在代码里存在
 - [ ] `freeze-test.sh` 进 CI,绿
