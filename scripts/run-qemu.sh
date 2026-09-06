@@ -128,7 +128,7 @@ if [ -f "$STATUS_FILE" ]; then
 	esac
 fi
 
-if [ "$qemu_rc" -eq 0 ]; then
+if [ "$qemu_rc" -eq 0 ] && [ -n "$SCRIPT" ]; then
 	echo "guest did not report a completion status" >&2
 	exit 125
 fi
