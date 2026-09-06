@@ -1,5 +1,8 @@
 criu/
 
+# Local isolated implementation worktrees.
+.worktrees/
+
 # Out-of-tree kernel module build products.
 kernel_module/*.o
 kernel_module/*.ko
