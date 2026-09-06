@@ -13,6 +13,7 @@ SERIES="v${VERSION%%.*}.x"
 KROOT="${KROOT:-$HOME/kernels}"
 KDIR="$KROOT/linux-$VERSION"
 JOBS="${JOBS:-$(nproc)}"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mkdir -p "$KROOT"
 
@@ -24,6 +25,10 @@ if [ ! -d "$KDIR" ]; then
 fi
 
 cd "$KDIR"
+
+if [ "$VERSION" = "5.10.29" ]; then
+	"$PROJECT_DIR/scripts/apply-kernel-patches.sh" "$KDIR"
+fi
 
 echo ">>> Base config"
 make -s defconfig

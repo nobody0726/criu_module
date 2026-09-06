@@ -15,7 +15,7 @@ probe:
 	if $(MAKE) -C "$(KDIR)" M="$(PWD)" modules >"$$log" 2>&1; then \
 		cat "$$log"; \
 		echo "A2_FREEZER: COMPILE_PASS"; \
-		echo "A2_FREEZER: SYMBOLS cgroup_freeze cgroup_freezer_migrate_task cgroup_enter_frozen cgroup_leave_frozen"; \
+		echo "A2_FREEZER: SYMBOLS criu_cgroup_freeze_threadgroup criu_cgroup_thaw_threadgroup"; \
 		echo "A2_FREEZER: PASS"; \
 	else \
 		cat "$$log"; \
