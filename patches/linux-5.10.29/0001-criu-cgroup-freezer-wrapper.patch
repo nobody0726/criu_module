@@ -45,7 +45,12 @@
  #include <linux/errno.h>
  #include <linux/init_task.h>
  #include <linux/kernel.h>
-@@ -5571,0 +5571,202 @@ int cgroup_rmdir(struct kernfs_node *kn)
+@@ -5566,8 +5567,207 @@
+ 
+ 	cgroup_kn_unlock(kn);
+ 	return ret;
++}
++
 +/*
 + * A narrow in-kernel cgroup-v2 freezer boundary for CRIU's out-of-tree
 + * module.  The module must not depend on cgroup-internal.h: cgroup creation,
@@ -70,8 +75,8 @@
 +	if (ret)
 +		pr_warn("CRIU freezer: unable to remove temporary cgroup (%d)\n",
 +			ret);
-+}
-+
+ }
+ 
 +int criu_cgroup_freeze_threadgroup(struct task_struct *leader,
 +				   struct criu_freezer_cookie **cookie,
 +				   char *original_path, size_t original_len,
@@ -81,7 +86,6 @@
 +	struct cgroup *original = NULL, *temporary = NULL;
 +	struct kernfs_node *child_kn = NULL;
 +	char name[64];
-+	char parent_path[PATH_MAX];
 +	int ret, path_len;
 +	bool threadgroup_locked = false;
 +
@@ -118,7 +122,6 @@
 +		ret = -ENAMETOOLONG;
 +		goto out_put_original;
 +	}
-+	strscpy(parent_path, original_path, sizeof(parent_path));
 +	mutex_unlock(&cgroup_mutex);
 +
 +	ret = scnprintf(name, sizeof(name), "criu-freeze-%llu",
@@ -133,11 +136,11 @@
 +	if (ret)
 +		goto out_put_original_unlocked;
 +
-+	if (!strcmp(parent_path, "/"))
++	if (!strcmp(original_path, "/"))
 +		ret = scnprintf(temporary_path, temporary_len, "/%s", name);
 +	else
 +		ret = scnprintf(temporary_path, temporary_len, "%s/%s",
-+				parent_path, name);
++				original_path, name);
 +	if (ret < 0 || ret >= temporary_len) {
 +		ret = -ENAMETOOLONG;
 +		goto out_remove_by_name;
@@ -187,7 +190,6 @@
 +		cgroup_rmdir(child_kn);
 +		kernfs_put(child_kn);
 +	}
-+out_release_original_after_remove:
 +	cgroup_put(original);
 +	if (threadgroup_locked)
 +		cgroup_threadgroup_change_end(leader);
@@ -249,5 +251,5 @@
 +EXPORT_SYMBOL_GPL(criu_cgroup_thaw_threadgroup);
 +
  static struct kernfs_syscall_ops cgroup_kf_syscall_ops = {
- 	.show_options	= cgroup_show_options,
- 	.mkdir		= cgroup_mkdir,
+ 	.show_options		= cgroup_show_options,
+ 	.mkdir			= cgroup_mkdir,
