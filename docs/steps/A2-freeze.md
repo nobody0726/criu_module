@@ -156,7 +156,7 @@ int criu_freeze(pid_t vpid, bool include_children,
 
 /* Reverse criu_freeze(): thaw, restore the original cgroup membership, and
  * free the context. Safe to call with ctx == NULL. */
-void criu_thaw(struct criu_freeze_ctx *ctx);
+int criu_thaw(struct criu_freeze_ctx *ctx);
 
 /* True once every task in the group is off-CPU and its registers have been
  * saved to its kernel stack -- i.e. task_pt_regs() is meaningful. */
