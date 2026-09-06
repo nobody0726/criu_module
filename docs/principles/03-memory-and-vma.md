@@ -80,7 +80,12 @@ struct vm_area_struct {
 | 匿名 + private | `VMA_ANON_PRIVATE` | `vma_is_anonymous(vma) && !(vm_flags & VM_SHARED)` |
 | 匿名 + shared | `VMA_ANON_SHARED` | `VM_SHARED && vm_file && (file_inode(vm_file)->i_flags & S_PRIVATE)` |
 | 文件 + private | `VMA_FILE_PRIVATE` | `vma->vm_file && !(vm_flags & VM_SHARED)` |
-| 文件 + shared | `VMA_FILE_SHARED` | `vma->vm_file && (vm_flags & VM_SHARED)` |
+| 文件 + shared | `VMA_FILE_SHARED` | `vma->vm_file && (vm_flags & VM_MAYSHARE)` |
+
+`VM_SHARED` 表示当前映射的写时共享属性，而 `/proc/PID/maps` 的 `s/p` 标记使用
+`VM_MAYSHARE`。只读的 `MAP_SHARED` 可能清除 `VM_SHARED` 但仍应显示为 `s`，因此
+读取层必须保留这两个概念；匿名共享的内部 shmem 判据仍使用 `VM_SHARED` 加
+`S_PRIVATE`。
 
 ### 一个必须记住的陷阱
 

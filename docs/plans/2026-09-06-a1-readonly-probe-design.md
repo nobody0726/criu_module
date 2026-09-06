@@ -37,7 +37,8 @@ the following order:
 3. `VM_SHARED` + `vm_file` + `inode->i_flags & S_PRIVATE` ->
    `CRIU_VMA_ANON_SHARED`. This is the path created by 5.10's
    `shmem_zero_setup()` for `MAP_SHARED|MAP_ANONYMOUS`.
-4. `VM_MAYSHARE` + `vm_file` -> `CRIU_VMA_FILE_SHARED`.
+4. `VM_MAYSHARE` + `vm_file` -> `CRIU_VMA_FILE_SHARED`. This matches the
+   `/proc/PID/maps` `p/s` marker and preserves read-only `MAP_SHARED` mappings.
 5. `vm_file` -> `CRIU_VMA_FILE_PRIVATE`.
 6. Anything else -> `CRIU_VMA_UNSUPPORTED`.
 
