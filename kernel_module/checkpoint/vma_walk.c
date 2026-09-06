@@ -101,17 +101,14 @@ static void fill_vma(struct vm_area_struct *vma, struct criu_vma_info *out)
 	kfree(buf);
 }
 
-int criu_walk_vmas(struct task_struct *task, criu_vma_info_fn fn, void *arg)
+static int criu_walk_vmas_mm(struct mm_struct *mm, criu_vma_info_fn fn,
+			      void *arg)
 {
-	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	int ret = 0;
 
-	if (!task || !fn)
+	if (!mm || !fn)
 		return -EINVAL;
-	mm = get_task_mm(task);
-	if (!mm)
-		return -ESRCH;
 	mmap_read_lock(mm);
 	for (vma = mm->mmap; vma; vma = vma->vm_next) {
 		struct criu_vma_info info;
@@ -122,6 +119,20 @@ int criu_walk_vmas(struct task_struct *task, criu_vma_info_fn fn, void *arg)
 			break;
 	}
 	mmap_read_unlock(mm);
+	return ret;
+}
+
+int criu_walk_vmas(struct task_struct *task, criu_vma_info_fn fn, void *arg)
+{
+	struct mm_struct *mm;
+	int ret;
+
+	if (!task || !fn)
+		return -EINVAL;
+	mm = get_task_mm(task);
+	if (!mm)
+		return -ESRCH;
+	ret = criu_walk_vmas_mm(mm, fn, arg);
 	mmput(mm);
 	return ret;
 }
@@ -144,21 +155,20 @@ static int count_vma(const struct criu_vma_info *info, void *arg)
 	return 0;
 }
 
-int criu_collect_mm_info(struct task_struct *task, struct criu_mm_info *out)
+static int criu_collect_mm_info_mm(struct task_struct *task,
+				   struct mm_struct *mm,
+				   struct criu_mm_info *out)
 {
-	struct mm_struct *mm;
 	struct count_ctx count = { 0 };
 
-	if (!task || !out)
+	if (!task || !mm || !out)
 		return -EINVAL;
-	mm = get_task_mm(task);
-	if (!mm)
-		return -ESRCH;
 	memset(out, 0, sizeof(*out));
 	out->pid = task_pid_nr(task);
 	out->tgid = task_tgid_nr(task);
 	get_task_comm(out->comm, task);
 	out->state = READ_ONCE(task->state);
+	mmap_read_lock(mm);
 	out->total_vm = mm->total_vm;
 	out->start_code = mm->start_code;
 	out->end_code = mm->end_code;
@@ -171,13 +181,28 @@ int criu_collect_mm_info(struct task_struct *task, struct criu_mm_info *out)
 	out->arg_end = mm->arg_end;
 	out->env_start = mm->env_start;
 	out->env_end = mm->env_end;
-	mmput(mm);
-	if (criu_walk_vmas(task, count_vma, &count))
-		return -ESRCH;
+	mmap_read_unlock(mm);
+	if (criu_walk_vmas_mm(mm, count_vma, &count))
+		return -EAGAIN;
 	out->vma_count = count.count;
 	out->special_count = count.special;
 	out->unsupported_count = count.unsupported;
 	return 0;
+}
+
+int criu_collect_mm_info(struct task_struct *task, struct criu_mm_info *out)
+{
+	struct mm_struct *mm;
+	int ret;
+
+	if (!task || !out)
+		return -EINVAL;
+	mm = get_task_mm(task);
+	if (!mm)
+		return -ESRCH;
+	ret = criu_collect_mm_info_mm(task, mm, out);
+	mmput(mm);
+	return ret;
 }
 
 struct fill_ctx {
@@ -227,7 +252,7 @@ int criu_snapshot_capture(struct task_struct *task, struct criu_snapshot *out,
 	mm = get_task_mm(task);
 	if (!mm)
 		return -ESRCH;
-	ret = criu_collect_mm_info(task, &out->mm);
+	ret = criu_collect_mm_info_mm(task, mm, &out->mm);
 	if (ret)
 		goto out_mm;
 	for (attempt = 0; attempt < 3; attempt++) {
@@ -246,7 +271,7 @@ int criu_snapshot_capture(struct task_struct *task, struct criu_snapshot *out,
 		fill.vmas = out->vmas;
 		fill.capacity = capacity;
 		fill.count = 0;
-		ret = criu_walk_vmas(task, fill_vma_array, &fill);
+		ret = criu_walk_vmas_mm(mm, fill_vma_array, &fill);
 		if (ret != -E2BIG) {
 			out->mm.vma_count = fill.count;
 			ret = 0;
