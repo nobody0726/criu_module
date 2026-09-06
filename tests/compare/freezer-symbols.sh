@@ -38,11 +38,6 @@ if ! grep -q " $CGROUP_ROOT cgroup2 " /proc/mounts; then
 		blocked "cannot mount cgroup2 at $CGROUP_ROOT"
 fi
 
-[ -r "$CGROUP_ROOT/cgroup.freeze" ] ||
-	blocked "cgroup2 freezer file is unavailable"
-[ -r "$CGROUP_ROOT/cgroup.events" ] ||
-	blocked "cgroup2 events file is unavailable"
-
 PROBE_CGROUP="$CGROUP_ROOT/criu-a2-probe.$$"
 mkdir "$PROBE_CGROUP" || blocked "cannot create probe cgroup"
 cleanup_probe() {
@@ -85,7 +80,7 @@ config_value() {
 }
 
 if [ -n "${config_file:-}" ]; then
-	for key in CONFIG_CGROUPS CONFIG_FREEZER; do
+	for key in CONFIG_CGROUPS; do
 		if ! config_value "$key" >/dev/null 2>&1; then
 			blocked "$key is disabled in $config_file"
 		fi
@@ -95,6 +90,6 @@ else
 	echo "A2_FREEZER: CONFIG_UNAVAILABLE: kernel config is not readable"
 fi
 
-echo "A2_FREEZER: CGROUP2_PASS: freezer controller available"
+echo "A2_FREEZER: CGROUP2_PASS: child freezer files functional"
 echo "A2_FREEZER: PASS"
 exit 0

@@ -45,12 +45,7 @@
  #include <linux/errno.h>
  #include <linux/init_task.h>
  #include <linux/kernel.h>
-@@ -5566,8 +5567,207 @@
- 
- 	cgroup_kn_unlock(kn);
- 	return ret;
-+}
-+
+@@ -5570,0 +5570,202 @@
 +/*
 + * A narrow in-kernel cgroup-v2 freezer boundary for CRIU's out-of-tree
 + * module.  The module must not depend on cgroup-internal.h: cgroup creation,
@@ -75,8 +70,7 @@
 +	if (ret)
 +		pr_warn("CRIU freezer: unable to remove temporary cgroup (%d)\n",
 +			ret);
- }
- 
++}
 +int criu_cgroup_freeze_threadgroup(struct task_struct *leader,
 +				   struct criu_freezer_cookie **cookie,
 +				   char *original_path, size_t original_len,
@@ -233,13 +227,17 @@
 +	mutex_lock(&cgroup_mutex);
 +	cgroup_freeze(temporary, false);
 +	ret = cgroup_attach_task(original, leader, true);
++	if (ret)
++		cgroup_freeze(temporary, true);
 +	mutex_unlock(&cgroup_mutex);
 +	cgroup_threadgroup_change_end(leader);
 +	if (ret)
++		/* Keep the cookie live so the caller can retry thaw. */
 +		return ret;
 +
 +	ret = cgroup_rmdir(temporary->kn);
 +	if (ret)
++		/* Membership is restored; keep refs for a retry of cgroup_rmdir. */
 +		return ret;
 +
 +	cgroup_put(temporary);
@@ -250,6 +248,3 @@
 +}
 +EXPORT_SYMBOL_GPL(criu_cgroup_thaw_threadgroup);
 +
- static struct kernfs_syscall_ops cgroup_kf_syscall_ops = {
- 	.show_options		= cgroup_show_options,
- 	.mkdir			= cgroup_mkdir,

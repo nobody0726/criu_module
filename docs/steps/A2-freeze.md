@@ -75,7 +75,7 @@ checkpoint 之前**自己**收到了一个真的 `SIGSTOP`(还没处理),你的 
 3. 它冻结的是**调度层面**,不动信号状态,天然满足「不可观测」
 4. 通过 `cgroup_attach_task()` / kernfs 写入操作,不需要未导出符号
 
-代价:需要 `CONFIG_CGROUPS`/`CONFIG_FREEZER`，而且目标进程会被
+代价:需要 `CONFIG_CGROUPS`，而且目标进程会被
 临时移进一个新 cgroup —— **这本身就是可观测的**(`/proc/PID/cgroup` 变了)。
 所以 A2 必须做的一件事是:**记下原 cgroup 路径,解冻后移回去。**
 
