@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/errno.h>
+#include <linux/criu_freezer.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
@@ -22,6 +26,9 @@ struct criu_freeze_ctx {
 	bool include_children;
 	struct criu_freeze_task *tasks;
 	unsigned int task_count;
+	struct criu_freezer_cookie *cgroup_cookie;
+	char original_cgroup[CRIU_PATH_MAX];
+	char temporary_cgroup[CRIU_PATH_MAX];
 };
 
 struct criu_freeze_task {
@@ -33,6 +40,21 @@ struct criu_freeze_task {
 static DEFINE_MUTEX(criu_freeze_lock);
 static struct criu_freeze_ctx *criu_freeze_current;
 static enum criu_freeze_state criu_freeze_current_state = CRIU_FREEZE_IDLE;
+static unsigned int settle_timeout_ms = 5000;
+module_param(settle_timeout_ms, uint, 0644);
+
+static bool criu_freeze_settled_locked(struct criu_freeze_ctx *ctx)
+{
+	unsigned int i;
+
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FREEZING)
+		return false;
+	for (i = 0; i < ctx->task_count; i++)
+		if (READ_ONCE(ctx->tasks[i].task->state) == TASK_RUNNING)
+			return false;
+	return true;
+}
 
 static void criu_freeze_release_tasks(struct criu_freeze_ctx *ctx)
 {
@@ -151,6 +173,13 @@ int criu_freeze(pid_t vpid, bool include_children,
 		mutex_unlock(&criu_freeze_lock);
 		return -ESRCH;
 	}
+	if (target != target->group_leader) {
+		struct task_struct *leader = target->group_leader;
+
+		get_task_struct(leader);
+		put_task_struct(target);
+		target = leader;
+	}
 
 	new_ctx->target = target;
 	new_ctx->target_generation = generation;
@@ -164,6 +193,45 @@ int criu_freeze(pid_t vpid, bool include_children,
 		kfree(new_ctx);
 		mutex_unlock(&criu_freeze_lock);
 		return ret;
+	}
+	ret = criu_cgroup_freeze_threadgroup(target->group_leader,
+					     &new_ctx->cgroup_cookie,
+					     new_ctx->original_cgroup,
+					     sizeof(new_ctx->original_cgroup),
+					     new_ctx->temporary_cgroup,
+					     sizeof(new_ctx->temporary_cgroup));
+	if (ret) {
+		criu_freeze_release_tasks(new_ctx);
+		put_task_struct(target);
+		criu_freeze_current = NULL;
+		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_ROLLBACK);
+		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_IDLE);
+		kfree(new_ctx);
+		mutex_unlock(&criu_freeze_lock);
+		return ret;
+	}
+	{
+		unsigned long deadline = jiffies +
+			msecs_to_jiffies(settle_timeout_ms);
+
+		while (!criu_freeze_settled_locked(new_ctx)) {
+			if (time_after_eq(jiffies, deadline)) {
+				criu_cgroup_thaw_threadgroup(new_ctx->cgroup_cookie);
+				criu_freeze_release_tasks(new_ctx);
+				put_task_struct(target);
+				criu_freeze_current = NULL;
+				WRITE_ONCE(criu_freeze_current_state,
+					   CRIU_FREEZE_ROLLBACK);
+				WRITE_ONCE(criu_freeze_current_state,
+					   CRIU_FREEZE_IDLE);
+				kfree(new_ctx);
+				mutex_unlock(&criu_freeze_lock);
+				return -ETIMEDOUT;
+			}
+			mutex_unlock(&criu_freeze_lock);
+			msleep(10);
+			mutex_lock(&criu_freeze_lock);
+		}
 	}
 	new_ctx->state = CRIU_FREEZE_FROZEN_SETTLED;
 	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_FROZEN_SETTLED);
@@ -185,6 +253,8 @@ void criu_thaw(struct criu_freeze_ctx *ctx)
 
 	ctx->state = CRIU_FREEZE_THAWING;
 	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_THAWING);
+	if (ctx->cgroup_cookie)
+		criu_cgroup_thaw_threadgroup(ctx->cgroup_cookie);
 	criu_freeze_release_tasks(ctx);
 	if (ctx->target)
 		put_task_struct(ctx->target);
