@@ -4,7 +4,8 @@
 
 > 相关原理:[04-image-format](../principles/04-image-format.md)、
 > [03-memory-and-vma](../principles/03-memory-and-vma.md)、
-> [05-registers-and-sigframe](../principles/05-registers-and-sigframe.md)
+> [05-registers-and-sigframe](../principles/05-registers-and-sigframe.md)、
+> [10-vma-semantics-and-attributes](../principles/10-vma-semantics-and-attributes.md)
 
 ---
 
@@ -202,6 +203,25 @@ A3 不用管它。这个洞是 X1 步骤要补的。
 
 **要抄的:** 全部镜像格式、`should_dump_page` 逻辑、vDSO 标记、pagemap/pages 分工。
 **不抄的:** parasite 注入(我们直接读内核);`/proc` 文本解析。
+
+### 2.7 进程信息与 VMA 属性的分层
+
+A3 的“极简进程”虽然只有一个进程，但镜像仍需同时表达四类状态：
+
+```text
+进程树/身份       -> pstree.img、ids-$pid.img
+线程 CPU 状态     -> core-$tid.img
+地址空间与页面    -> mm-$pid.img、pagemap-$pid.img、pages-*.img
+文件系统上下文    -> files.img、fdinfo-$pid.img、fs-$pid.img、creds-$pid.img
+```
+
+A1 产生的 task/mm 摘要和规范化 VMA 属性是读取层输入；A3 再把其中需要恢复的语义
+映射到 CRIU proto 字段。不要把 `vm_flags` 原始整数直接写入镜像。
+
+文件-backed VMA 的恢复策略必须区分“文件本身”与“已经 COW 的页面”：未 COW 的私有
+文件页可以依赖文件重建，已 COW 的页必须进入 pages 镜像；共享文件映射则需要保持
+文件对象、偏移和共享关系。若文件被移动、删除或内容/身份发生变化，恢复可能失败；
+仅凭保存原始路径不能保证可重定位。
 
 ---
 

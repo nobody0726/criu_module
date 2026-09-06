@@ -3,7 +3,8 @@
 **工期:** 2-3 周 · **前置:** A5、A7 · **产出:** 共享内存 + 跨进程共享 fd
 
 > 相关原理:[07-fd-and-shared-objects](../principles/07-fd-and-shared-objects.md)、
-> [03-memory-and-vma](../principles/03-memory-and-vma.md)
+> [03-memory-and-vma](../principles/03-memory-and-vma.md)、
+> [10-vma-semantics-and-attributes](../principles/10-vma-semantics-and-attributes.md)
 
 ---
 
@@ -55,14 +56,16 @@ A5 里去重只需要在单个进程的 fd 表内进行。A8 里,两个不同进
 
 > `VMA_ANON_SHARED` **也有 `vm_file`**,所以不能靠 `vm_file == NULL` 判断匿名。
 
+在外置模块中不能直接依赖未导出的 `vma_is_shmem()`。5.10.29 的
+`shmem_zero_setup()` 会为匿名共享映射创建带 `S_PRIVATE` 的内部 shmem file，因此
 判据必须是:
 
 ```c
 	/* An anonymous MAP_SHARED region is backed by an internal shmem inode,
 	 * so vm_file is NOT NULL. Use the shmem test, not a vm_file test.
 	 */
-	if (vma->vm_file && shmem_file(vma->vm_file) &&
-	    (vma->vm_flags & VM_SHARED))
+	if (vma->vm_file && (vma->vm_flags & VM_SHARED) &&
+	    (file_inode(vma->vm_file)->i_flags & S_PRIVATE))
 		return CRIU_VMA_ANON_SHARED;
 ```
 

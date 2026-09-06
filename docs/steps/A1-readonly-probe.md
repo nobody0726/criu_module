@@ -3,7 +3,8 @@
 **工期:** 1-2 周 · **前置:** S0 · **产出:** 能读出目标进程 VMA 列表,与 `/proc` 逐字段一致
 
 > 相关原理:[01-process-anatomy](../principles/01-process-anatomy.md)、
-> [03-memory-and-vma](../principles/03-memory-and-vma.md)
+> [03-memory-and-vma](../principles/03-memory-and-vma.md)、
+> [10-vma-semantics-and-attributes](../principles/10-vma-semantics-and-attributes.md)
 
 ---
 
@@ -90,10 +91,11 @@ CRIU **解析 `/proc/PID/smaps` 文本**。它必须这样做,因为它在用户
 
 | 类 | 内核里怎么判定 |
 |---|---|
-| `VMA_FILE_PRIVATE` | `vma->vm_file != NULL && !(vm_flags & VM_SHARED)` |
-| `VMA_FILE_SHARED` | `vma->vm_file != NULL && (vm_flags & VM_SHARED)` |
-| `VMA_ANON_SHARED` | `vma->vm_file == NULL && (vm_flags & VM_SHARED)` |
-| `VMA_ANON_PRIVATE` | `vma->vm_file == NULL && !(vm_flags & VM_SHARED)` |
+| `VMA_ANON_PRIVATE` | `vma_is_anonymous(vma)` |
+| `VMA_ANON_SHARED` | `VM_SHARED && vma->vm_file && (file_inode(vma->vm_file)->i_flags & S_PRIVATE)` |
+| `VMA_FILE_SHARED` | `VM_SHARED && vma->vm_file` (且不满足匿名共享判据) |
+| `VMA_FILE_PRIVATE` | `vma->vm_file && !(vm_flags & VM_SHARED)` |
+| `CRIU_VMA_UNSUPPORTED` | 其他组合或特殊 VMA |
 
 注意 `VMA_ANON_SHARED` 在内核里其实**也有 `vm_file`** —— 匿名共享内存底下是
 一个 shmem 文件。所以判定要用 `vma_is_anonymous(vma)` 或检查
@@ -136,10 +138,11 @@ struct task_struct *criu_get_task(pid_t vpid);
 
 /* vma_walk.c: classification matching CRIU's VMA_* status bits. */
 enum criu_vma_class {
-	CRIU_VMA_FILE_PRIVATE,
-	CRIU_VMA_FILE_SHARED,
-	CRIU_VMA_ANON_SHARED,
 	CRIU_VMA_ANON_PRIVATE,
+	CRIU_VMA_ANON_SHARED,
+	CRIU_VMA_FILE_SHARED,
+	CRIU_VMA_FILE_PRIVATE,
+	CRIU_VMA_UNSUPPORTED,
 };
 
 enum criu_vma_class criu_classify_vma(struct vm_area_struct *vma);
@@ -213,17 +216,27 @@ enum criu_vma_class criu_classify_vma(struct vm_area_struct *vma)
 	/* An anonymous shared mapping still has a vm_file -- shmem creates one
 	 * behind the scenes -- so vm_file alone cannot tell the two apart.
 	 */
-	if (vma_is_anonymous(vma) || (shared && vma_is_shmem(vma)))
-		return shared ? CRIU_VMA_ANON_SHARED : CRIU_VMA_ANON_PRIVATE;
+	if (vma_is_anonymous(vma))
+		return CRIU_VMA_ANON_PRIVATE;
 
-	return shared ? CRIU_VMA_FILE_SHARED : CRIU_VMA_FILE_PRIVATE;
+	/* MAP_SHARED|MAP_ANONYMOUS uses shmem_zero_setup() in 5.10.29.
+	 * It creates an unlinked kernel-private shmem file (S_PRIVATE). */
+	if (shared && vma->vm_file &&
+	    (file_inode(vma->vm_file)->i_flags & S_PRIVATE))
+		return CRIU_VMA_ANON_SHARED;
+
+	if (vma->vm_file)
+		return shared ? CRIU_VMA_FILE_SHARED : CRIU_VMA_FILE_PRIVATE;
+
+	return CRIU_VMA_UNSUPPORTED;
 }
 ```
 
-S0 要顺手验证 `vma_is_shmem()` 在 5.10.29 里可用(它在 `include/linux/mm.h`,
-但依赖 `CONFIG_SHMEM`)。不可用时的退路是比较
-`vma->vm_ops == &shmem_vm_ops` —— 但 `shmem_vm_ops` 未导出,所以退路是
-检查 `vma->vm_file->f_inode->i_sb->s_magic == TMPFS_MAGIC`。
+外置模块不能直接依赖 `vma_is_shmem()` 或 `shmem_vm_ops`：前者的实现不是导出符号，
+后者也不是模块可引用的稳定接口。5.10.29 的 `shmem_zero_setup()` 使用
+`S_PRIVATE` 创建匿名共享映射的内部 shmem file，因此 A1 使用
+`file_inode(vma->vm_file)->i_flags & S_PRIVATE` 作为匿名共享判据；显式 tmpfs/memfd
+映射不满足该判据，归为 `VMA_FILE_SHARED`。
 
 ### 4.4 取路径
 
@@ -240,6 +253,39 @@ S0 要顺手验证 `vma_is_shmem()` 在 5.10.29 里可用(它在 `include/linux/
 
 `d_path()` 从缓冲区**尾部**往前填,返回值指向缓冲区中间。这是内核里一个经典的
 新手陷阱 —— 用 `buf` 而不是返回值,会打印出垃圾。
+
+### 4.5 task/mm 摘要与 VMA 属性规范化
+
+A1 只处理一个目标 PID 对应的一个 `mm_struct`。同一线程组的用户线程通常共享同一个
+`mm`，因此一次 VMA walk 已经覆盖整个线程组的地址空间；每线程寄存器和信号状态留给
+后续 `core-$tid.img`。
+
+除可直接和 `/proc/PID/maps` 对照的 VMA 行外，A1 产生一份独立的 task/mm 摘要，供
+调试和后续 A3 复用：
+
+```text
+pid, tgid, comm, state
+mm_present, vma_count, total_vm
+start_code, end_code, start_data, end_data
+start_brk, brk, start_stack
+arg_start, arg_end, env_start, env_end
+```
+
+VMA 扩展输出同时保留两层信息：
+
+1. 诊断层：原始 `vm_flags`、`vm_page_prot` 等 5.10.29 内核值；
+2. 语义层：`prot`、`shared`、`anonymous`、`growsdown`、`dontdump`、`special` 和
+   `dump_policy` 等规范化字段。
+
+A1 只验证“能正确读取并规范化”，不把这些调试输出直接当成最终 CRIU 镜像格式。遇到
+`VM_IO`、`VM_PFNMAP`、`VM_HUGETLB` 或 `VM_MIXEDMAP` 等特殊 VMA 时，必须明确标记，
+不能假装它们已经由普通匿名页读取流程支持。
+
+### 4.6 单进程边界与跨进程共享
+
+A1 不遍历子进程，也不负责判断跨进程共享对象的完整生命周期。对于共享文件或共享匿名
+VMA，A1 仅输出当前进程所见的映射属性、文件身份、偏移和地址范围。共享对象的唯一
+身份、页面只保存一次以及多个进程的引用关系，分别在 A5/A7/A8 的资源收集阶段处理。
 
 ---
 

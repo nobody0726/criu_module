@@ -78,7 +78,7 @@ struct vm_area_struct {
 | 象限 | CRIU 标志 | 内核侧判据 |
 |---|---|---|
 | 匿名 + private | `VMA_ANON_PRIVATE` | `vma_is_anonymous(vma) && !(vm_flags & VM_SHARED)` |
-| 匿名 + shared | `VMA_ANON_SHARED` | `vma_is_shmem(vma) && (vm_flags & VM_SHARED)` |
+| 匿名 + shared | `VMA_ANON_SHARED` | `VM_SHARED && vm_file && (file_inode(vm_file)->i_flags & S_PRIVATE)` |
 | 文件 + private | `VMA_FILE_PRIVATE` | `vma->vm_file && !(vm_flags & VM_SHARED)` |
 | 文件 + shared | `VMA_FILE_SHARED` | `vma->vm_file && (vm_flags & VM_SHARED)` |
 
@@ -99,15 +99,19 @@ struct vm_area_struct {
 	if (!vma->vm_file)
 		return CRIU_VMA_ANON_PRIVATE;
 
-	/* RIGHT: use the kernel's own predicates. */
+	/* RIGHT for an in-kernel module: vma_is_anonymous() is inline. */
 	if (vma_is_anonymous(vma))
 		return CRIU_VMA_ANON_PRIVATE;
-	if (vma_is_shmem(vma) && (vma->vm_flags & VM_SHARED))
+	if ((vma->vm_flags & VM_SHARED) && vma->vm_file &&
+	    (file_inode(vma->vm_file)->i_flags & S_PRIVATE))
 		return CRIU_VMA_ANON_SHARED;
 ```
 
-**`vma_is_anonymous()` 只对真正的私有匿名映射返回真。** 匿名共享映射要用
-`vma_is_shmem()` 判断。
+**`vma_is_anonymous()` 只对真正的私有匿名映射返回真。** 在本项目的外置模块中，
+`vma_is_shmem()` 虽有声明但不是可依赖的导出符号；5.10.29 的
+`shmem_zero_setup()` 会为 `MAP_SHARED|MAP_ANONYMOUS` 创建带 `S_PRIVATE` 的内部
+shmem file，因此模块用该稳定实现标记识别匿名共享。显式 tmpfs/memfd 文件映射不满足
+这个判据，应归为 `VMA_FILE_SHARED`。
 
 这个 shmem inode 在文件系统里**没有路径** —— 它在一个内部 tmpfs 里,不在任何
 挂载点下。所以 restore 时没法 `open()` 它,必须用「锚点」重建(见
