@@ -15,15 +15,19 @@ process-tree freezing is a separate second-stage experiment.
 ## Decisions
 
 - Control plane: the kernel module owns the operation through debugfs.
-- Mechanism: use the Linux 5.10.29 cgroup v2 freezer, subject to a compile-time
-  symbol/configuration gate. Do not silently fall back to per-task freezer APIs.
+- Mechanism: use the Linux 5.10.29 cgroup v2 freezer through a small, project-
+  maintained GPL kernel wrapper. The wrapper is patched into `kernel/cgroup`
+  because the v2 freezer and cgroup migration primitives are not exported to
+  out-of-tree modules in the stock 5.10.29 tree. Do not silently fall back to
+  per-task freezer APIs.
 - Target selection: reuse A1's pinned `target` and generation state.
 - `freeze` is synchronous. It returns only after every target thread is settled,
   or after rollback on error/timeout.
 - Freeze scope: target PID's thread group only. Add independent
   `freeze_tree`/`thaw_tree` interfaces in the later descendants experiment.
 - Required privilege: `CAP_SYS_ADMIN`; the spike guest must provide cgroup v2
-  and `CONFIG_CGROUP_FREEZER`.
+  and `CONFIG_CGROUPS`. `CONFIG_CGROUP_FREEZER` is the legacy v1 option and is
+  not a v2 capability gate.
 - Target replacement is rejected with `-EBUSY` while a freeze context exists.
 - Any failure, including settled timeout, performs a complete rollback.
 - The state present before freezing is part of the contract: every thread's
@@ -51,6 +55,31 @@ freeze_ctx
 
 The context, rather than a numeric PID, is used by `thaw` and by all status
 reporting. This prevents PID reuse from thawing an unrelated task.
+
+## Kernel wrapper boundary
+
+The stock 5.10.29 kernel declares the v2 freezer helpers in headers but does
+not export them, and it does not export `cgroup_attach_task()`. A2 therefore
+ships a small source patch under `patches/linux-5.10.29/`. The patch adds a GPL
+exported high-level wrapper in the cgroup core. Its opaque cookie owns the
+temporary cgroup and the pinned original cgroup reference:
+
+```c
+struct criu_freezer_cookie;
+
+int criu_cgroup_freeze_threadgroup(struct task_struct *leader,
+                                   struct criu_freezer_cookie **cookie,
+                                   char *original_path, size_t original_len,
+                                   char *temporary_path, size_t temporary_len);
+int criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *cookie);
+```
+
+The wrapper runs inside the kernel's cgroup locking discipline and calls the
+private `cgroup_create()`, `cgroup_attach_task()`, and `cgroup_freeze()` logic.
+The module never reaches into `cgroup-internal.h`, never uses kallsyms, and
+never creates or destroys a cgroup by emulating kernfs writes. The build applies
+the patch before compiling the module; the probe verifies the wrapper's GPL
+export with modpost.
 
 ## Debugfs interface
 
@@ -139,7 +168,8 @@ define separate entry points instead of expanding the first state machine.
 - `-ESRCH`: no valid target, target exited, or target has no usable `mm`.
 - `-EBUSY`: active freeze context or target replacement during a freeze.
 - `-ETIMEDOUT`: settled polling exceeded its deadline.
-- `-EOPNOTSUPP`: cgroup v2 freezer/configuration/symbol gate is unavailable.
+- `-EOPNOTSUPP`: cgroup v2 freezer, wrapper patch, or required configuration is
+  unavailable.
 - `-EINVAL`: malformed control-file input.
 - `-ENOENT`: `thaw` requested without an active context.
 
@@ -192,8 +222,8 @@ load the module on the development host.
 
 ## Risks and explicit non-goals
 
-The primary feasibility risk is whether Linux 5.10.29 exports a callable cgroup
-freezer interface to an out-of-tree GPL module. The compile gate must make this
-fact explicit before implementation proceeds. This spike does not dump memory,
+The primary feasibility risk is whether the maintained wrapper patch applies
+cleanly and preserves the 5.10.29 cgroup locking invariants. The compile gate
+must make wrapper availability explicit before implementation proceeds. This spike does not dump memory,
 serialize task credentials/files/signals, handle descendants, or define a CRIU
 image format.

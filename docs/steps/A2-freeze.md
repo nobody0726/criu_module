@@ -2,6 +2,9 @@
 
 **工期:** 1 周 · **前置:** A1 · **产出:** 可靠冻结多线程进程,无信号丢失
 
+实现计划：[设计文档](../plans/2026-09-06-a2-freeze-design.md) ·
+[实现计划](../plans/2026-09-06-a2-freeze-implementation.md)
+
 > 相关原理:[02-freezing](../principles/02-freezing.md)
 
 ---
@@ -75,7 +78,7 @@ checkpoint 之前**自己**收到了一个真的 `SIGSTOP`(还没处理),你的 
 3. 它冻结的是**调度层面**,不动信号状态,天然满足「不可观测」
 4. 通过 `cgroup_attach_task()` / kernfs 写入操作,不需要未导出符号
 
-代价:需要 `CONFIG_CGROUP_FREEZER`(`build-kernel.sh` 已开),而且目标进程会被
+代价:需要 `CONFIG_CGROUPS`，而且目标进程会被
 临时移进一个新 cgroup —— **这本身就是可观测的**(`/proc/PID/cgroup` 变了)。
 所以 A2 必须做的一件事是:**记下原 cgroup 路径,解冻后移回去。**
 
@@ -153,7 +156,7 @@ int criu_freeze(pid_t vpid, bool include_children,
 
 /* Reverse criu_freeze(): thaw, restore the original cgroup membership, and
  * free the context. Safe to call with ctx == NULL. */
-void criu_thaw(struct criu_freeze_ctx *ctx);
+int criu_thaw(struct criu_freeze_ctx *ctx);
 
 /* True once every task in the group is off-CPU and its registers have been
  * saved to its kernel stack -- i.e. task_pt_regs() is meaningful. */
@@ -382,6 +385,8 @@ sh tests/compare/freeze-test.sh || exit 1
 
 - [ ] 12 个用例全部通过,含 5/6/7 三个难点
 - [ ] dmesg 干净(`DEBUG_ATOMIC_SLEEP` 尤其重要 —— freezer 路径里容易误睡眠)
-- [ ] `criu_freeze` / `criu_thaw` / `criu_freeze_settled` 接口冻结
+- [x] `criu_freeze` / `criu_thaw` / `criu_freeze_settled` 接口冻结
+- [x] debugfs `freeze` / `thaw` / `status` 控制面与回滚 gate
+- [ ] descendants/tree freezing（后续阶段）
 - [ ] 超时路径有测试覆盖,不是只在代码里存在
 - [ ] `freeze-test.sh` 进 CI,绿

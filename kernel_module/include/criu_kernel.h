@@ -73,11 +73,30 @@ struct criu_snapshot {
 	struct criu_vma_info *vmas;
 };
 
+struct criu_freeze_ctx;
+
+struct criu_freeze_status {
+	char state[16];
+	u64 generation;
+	unsigned int task_count;
+	bool settled;
+	bool was_stopped;
+	int last_error;
+	char original_cgroup[CRIU_PATH_MAX];
+	char temporary_cgroup[CRIU_PATH_MAX];
+};
+
 typedef int (*criu_vma_info_fn)(const struct criu_vma_info *info, void *arg);
 
 int criu_target_set(pid_t pid);
 struct task_struct *criu_target_get(u64 *generation);
 void criu_target_clear(void);
+bool criu_freeze_context_active(void);
+int criu_freeze(pid_t vpid, bool include_children,
+		struct criu_freeze_ctx **ctx);
+int criu_thaw(struct criu_freeze_ctx *ctx);
+bool criu_freeze_settled(struct criu_freeze_ctx *ctx);
+int criu_freeze_status(struct criu_freeze_status *out);
 int criu_collect_mm_info(struct task_struct *task, struct criu_mm_info *out);
 int criu_walk_vmas(struct task_struct *task, criu_vma_info_fn fn, void *arg);
 int criu_snapshot_capture(struct task_struct *task, struct criu_snapshot *out,

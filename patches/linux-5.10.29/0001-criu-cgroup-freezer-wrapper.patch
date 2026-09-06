@@ -1,0 +1,250 @@
+--- a/include/linux/criu_freezer.h
++++ b/include/linux/criu_freezer.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_CRIU_FREEZER_H
++#define _LINUX_CRIU_FREEZER_H
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++struct task_struct;
++struct criu_freezer_cookie;
++
++#ifdef CONFIG_CGROUPS
++int criu_cgroup_freeze_threadgroup(struct task_struct *leader,
++				   struct criu_freezer_cookie **cookie,
++				   char *original_path, size_t original_len,
++				   char *temporary_path, size_t temporary_len);
++int criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *cookie);
++#else
++static inline int
++criu_cgroup_freeze_threadgroup(struct task_struct *leader,
++				       struct criu_freezer_cookie **cookie,
++				       char *original_path, size_t original_len,
++				       char *temporary_path, size_t temporary_len)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int
++criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *cookie)
++{
++	return -EOPNOTSUPP;
++}
++#endif
++
++#endif /* _LINUX_CRIU_FREEZER_H */
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -31,6 +31,7 @@
+ #include "cgroup-internal.h"
+
+ #include <linux/cred.h>
++#include <linux/criu_freezer.h>
+ #include <linux/errno.h>
+ #include <linux/init_task.h>
+ #include <linux/kernel.h>
+@@ -5570,0 +5570,202 @@
++/*
++ * A narrow in-kernel cgroup-v2 freezer boundary for CRIU's out-of-tree
++ * module.  The module must not depend on cgroup-internal.h: cgroup creation,
++ * migration and freezer transitions all remain inside this translation unit.
++ */
++struct criu_freezer_cookie {
++	struct cgroup *original;
++	struct cgroup *temporary;
++	struct task_struct *leader;
++};
++
++static atomic64_t criu_freezer_seq = ATOMIC64_INIT(0);
++
++static void criu_freezer_destroy_temporary(struct cgroup *temporary)
++{
++	int ret;
++
++	if (!temporary)
++		return;
++
++	ret = cgroup_rmdir(temporary->kn);
++	if (ret)
++		pr_warn("CRIU freezer: unable to remove temporary cgroup (%d)\n",
++			ret);
++}
++int criu_cgroup_freeze_threadgroup(struct task_struct *leader,
++				   struct criu_freezer_cookie **cookie,
++				   char *original_path, size_t original_len,
++				   char *temporary_path, size_t temporary_len)
++{
++	struct criu_freezer_cookie *ctx;
++	struct cgroup *original = NULL, *temporary = NULL;
++	struct kernfs_node *child_kn = NULL;
++	char name[64];
++	int ret, path_len;
++	bool threadgroup_locked = false;
++
++	if (!leader || !cookie || !original_path || !temporary_path ||
++	    !original_len || !temporary_len ||
++	    leader != leader->group_leader)
++		return -EINVAL;
++	if (*cookie)
++		return -EBUSY;
++
++	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	/* Exclude fork and cgroup migration while taking the threadgroup snapshot. */
++	cgroup_threadgroup_change_begin(leader);
++	threadgroup_locked = true;
++
++	mutex_lock(&cgroup_mutex);
++	spin_lock_irq(&css_set_lock);
++	original = task_cgroup_from_root(leader, &cgrp_dfl_root);
++	if (original && cgroup_on_dfl(original))
++		cgroup_get_live(original);
++	else
++		original = NULL;
++	spin_unlock_irq(&css_set_lock);
++	if (!original) {
++		ret = -EOPNOTSUPP;
++		goto out_unlock;
++	}
++
++	path_len = cgroup_path(original, original_path, original_len);
++	if (path_len < 0 || path_len >= original_len) {
++		ret = -ENAMETOOLONG;
++		goto out_put_original;
++	}
++	mutex_unlock(&cgroup_mutex);
++
++	ret = scnprintf(name, sizeof(name), "criu-freeze-%llu",
++			(unsigned long long)atomic64_inc_return(&criu_freezer_seq));
++	if (ret >= sizeof(name)) {
++		ret = -ENAMETOOLONG;
++		goto out_put_original_unlocked;
++	}
++
++	/* cgroup_mkdir performs the normal kernfs/css setup and activation. */
++	ret = cgroup_mkdir(original->kn, name, 0755);
++	if (ret)
++		goto out_put_original_unlocked;
++
++	if (!strcmp(original_path, "/"))
++		ret = scnprintf(temporary_path, temporary_len, "/%s", name);
++	else
++		ret = scnprintf(temporary_path, temporary_len, "%s/%s",
++				original_path, name);
++	if (ret < 0 || ret >= temporary_len) {
++		ret = -ENAMETOOLONG;
++		goto out_remove_by_name;
++	}
++
++	/* Pin the new cgroup through the kernfs node before taking its css ref. */
++	child_kn = kernfs_find_and_get(original->kn, name);
++	if (!child_kn || kernfs_type(child_kn) != KERNFS_DIR) {
++		ret = -ENOENT;
++		goto out_remove_by_name;
++	}
++	temporary = child_kn->priv;
++	mutex_lock(&cgroup_mutex);
++	if (cgroup_is_dead(temporary)) {
++		mutex_unlock(&cgroup_mutex);
++		ret = -ENODEV;
++		goto out_put_child_kn;
++	}
++	cgroup_get_live(temporary);
++	mutex_unlock(&cgroup_mutex);
++	kernfs_put(child_kn);
++	child_kn = NULL;
++
++	mutex_lock(&cgroup_mutex);
++	ret = cgroup_attach_task(temporary, leader, true);
++	if (!ret)
++		cgroup_freeze(temporary, true);
++	mutex_unlock(&cgroup_mutex);
++	if (ret)
++		goto out_destroy_temporary;
++
++	get_task_struct(leader);
++	ctx->original = original;
++	ctx->temporary = temporary;
++	ctx->leader = leader;
++	*cookie = ctx;
++	cgroup_threadgroup_change_end(leader);
++	return 0;
++
++out_put_child_kn:
++	if (child_kn)
++		kernfs_put(child_kn);
++out_remove_by_name:
++	/* The cgroup is empty because migration has not started. */
++	child_kn = kernfs_find_and_get(original->kn, name);
++	if (child_kn) {
++		cgroup_rmdir(child_kn);
++		kernfs_put(child_kn);
++	}
++	cgroup_put(original);
++	if (threadgroup_locked)
++		cgroup_threadgroup_change_end(leader);
++	kfree(ctx);
++	return ret;
++
++out_destroy_temporary:
++	criu_freezer_destroy_temporary(temporary);
++	cgroup_put(temporary);
++out_put_original_unlocked:
++	cgroup_put(original);
++	if (threadgroup_locked)
++		cgroup_threadgroup_change_end(leader);
++	kfree(ctx);
++	return ret;
++
++out_put_original:
++	cgroup_put(original);
++out_unlock:
++	mutex_unlock(&cgroup_mutex);
++	if (threadgroup_locked)
++		cgroup_threadgroup_change_end(leader);
++	kfree(ctx);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(criu_cgroup_freeze_threadgroup);
++
++int criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *ctx)
++{
++	struct cgroup *original, *temporary;
++	struct task_struct *leader;
++	int ret;
++
++	if (!ctx || !ctx->original || !ctx->temporary || !ctx->leader)
++		return -EINVAL;
++
++	original = ctx->original;
++	temporary = ctx->temporary;
++	leader = ctx->leader;
++	cgroup_threadgroup_change_begin(leader);
++	mutex_lock(&cgroup_mutex);
++	cgroup_freeze(temporary, false);
++	ret = cgroup_attach_task(original, leader, true);
++	if (ret)
++		cgroup_freeze(temporary, true);
++	mutex_unlock(&cgroup_mutex);
++	cgroup_threadgroup_change_end(leader);
++	if (ret)
++		/* Keep the cookie live so the caller can retry thaw. */
++		return ret;
++
++	ret = cgroup_rmdir(temporary->kn);
++	if (ret)
++		/* Membership is restored; keep refs for a retry of cgroup_rmdir. */
++		return ret;
++
++	cgroup_put(temporary);
++	cgroup_put(original);
++	put_task_struct(leader);
++	kfree(ctx);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(criu_cgroup_thaw_threadgroup);
++

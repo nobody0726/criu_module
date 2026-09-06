@@ -21,7 +21,10 @@ trap 'rmmod criu_kernel 2>/dev/null || true' EXIT
 
 [ -r "$DEBUG_DIR/status" ] || fail "status file missing"
 status=$(cat "$DEBUG_DIR/status")
-[ "$status" = "criu_kernel:ok" ] || fail "unexpected status: $status"
+printf '%s\n' "$status" | grep -qx 'criu_kernel:ok' ||
+	fail "status health marker missing: $status"
+printf '%s\n' "$status" | grep -q '^freeze_state=idle ' ||
+	fail "freeze status missing: $status"
 
 dmesg | tail -n 80 | grep -q 'criu_kernel: loaded' \
 	|| fail "load message missing"

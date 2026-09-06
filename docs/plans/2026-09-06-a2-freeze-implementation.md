@@ -14,37 +14,40 @@
 
 - Run all module load, cgroup, and task-state tests inside `./scripts/run-qemu.sh`; never `insmod` on macOS or Lima directly.
 - Preserve the untracked `artifacts/` directory.
-- Treat cgroup freezer symbol availability as a hard gate. If the target kernel does not export a usable interface to a GPL out-of-tree module, stop after Task 1 and report `A2_FREEZER: BLOCKED`; do not substitute per-task APIs or a user-space helper.
+- Treat the maintained kernel-wrapper patch and its exported GPL ABI as a hard gate. If the patch does not apply or the target kernel cannot export the wrapper to a GPL out-of-tree module, stop after Task 1 and report `A2_FREEZER: BLOCKED`; do not substitute per-task APIs or a user-space helper.
 - Use TDD for each behavior: add or extend the guest test, run it to capture the expected failure, implement the smallest change, rerun the focused gate, then commit.
 - Keep A1 read views generation-safe while a freeze context is active. Do not add dump/image code in A2.
 
-### Task 1: Establish the freezer feasibility gate
+### Task 1: Add the 5.10.29 wrapper patch and establish the feasibility gate
 
 **Files:**
+- Create: `patches/linux-5.10.29/0001-criu-cgroup-freezer-wrapper.patch`
+- Create: `scripts/apply-kernel-patches.sh`
 - Create: `spike/probes/a2-freezer-symbols.c`
 - Create: `spike/probes/Makefile`
 - Create: `tests/compare/freezer-symbols.sh`
-- Modify: `scripts/build-kernel.sh` only if the guest preflight proves a required cgroup-v2 option is missing
+- Modify: `scripts/build-kernel.sh` to apply the patch after unpacking and before `olddefconfig`
 
 **Step 1: Write the compile probe**
 
-Reference the exact cgroup-v2 freezer operations found in the Linux 5.10.29 source tree and build a minimal GPL module that calls them without loading it. Keep the probe isolated from `criu_kernel.ko` so a failed symbol export cannot contaminate the A2 implementation.
+Add a minimal high-level GPL wrapper inside the kernel cgroup core. It must create a uniquely named child cgroup, attach the complete target thread group, freeze it, retain the original cgroup reference/path in an opaque cookie, and reverse the operation on thaw. Export only the wrapper ABI; keep all calls to `cgroup_create()`, `cgroup_attach_task()`, and `cgroup_freeze()` inside the patched kernel source. Update the isolated probe to include the wrapper header and call only the exported wrapper symbols without loading the probe.
 
 **Step 2: Run the probe and guest preflight**
 
 Run:
 
 ```bash
+scripts/apply-kernel-patches.sh $HOME/kernels/linux-5.10.29
 make -C spike/probes KDIR=$HOME/kernels/linux-5.10.29
 ./scripts/run-qemu.sh --ci --script tests/compare/freezer-symbols.sh
 ```
 
-Expected: the probe either exits 0 and prints the callable symbol list, or exits nonzero with `A2_FREEZER: BLOCKED` and the unresolved symbols. The guest script must also verify a mounted cgroup2 hierarchy with the `freezer` controller available.
+Expected: the patch applies cleanly, the probe either exits 0 and prints the wrapper symbol list, or exits nonzero with `A2_FREEZER: BLOCKED` and the unresolved wrapper symbols. The guest script must verify a mounted cgroup2 hierarchy and functional child `cgroup.freeze`/`cgroup.events` files; it must not look for `freezer` in `cgroup.controllers`.
 
 **Step 3: Commit the gate**
 
 ```bash
-git add spike/probes tests/compare/freezer-symbols.sh scripts/build-kernel.sh
+git add patches scripts spike/probes tests/compare/freezer-symbols.sh
 git commit -m "test: gate A2 on cgroup freezer symbols" -m "Assisted-by: Codex: GPT-5"
 ```
 
@@ -144,7 +147,7 @@ Run the script before implementation. Expected: failure at the missing cgroup ad
 
 **Step 2: Implement cgroup ownership and movement**
 
-Using only the symbols accepted by Task 1, record the complete original cgroup-v2 path, create a uniquely named temporary freezer cgroup, move all pinned thread-group tasks into it, and request frozen state. Keep references to both cgroups until thaw or rollback. Return `-EOPNOTSUPP` if the adapter preconditions are not met.
+Using only the exported wrapper ABI accepted by Task 1, record the complete original cgroup-v2 path, create a uniquely named temporary freezer cgroup, move all pinned thread-group tasks into it, and request frozen state. Keep the opaque cookie until thaw or rollback. Return `-EOPNOTSUPP` if the patched adapter preconditions are not met.
 
 **Step 3: Implement synchronous settle**
 
@@ -297,7 +300,7 @@ git commit -m "test: integrate A2 freeze gates" -m "Assisted-by: Codex: GPT-5"
 
 ## Completion checklist
 
-- [ ] Task 1 proves cgroup-v2 freezer symbols/configuration are usable or records a hard block.
+- [ ] Task 1 applies the 5.10.29 wrapper patch and proves its exported GPL ABI or records a hard block.
 - [ ] Thread-group freeze is synchronous and settled before success.
 - [ ] Original cgroup membership and stopped state are restored by thaw.
 - [ ] Duplicate operations, permissions, exits, timeout, and unload behavior are tested.
