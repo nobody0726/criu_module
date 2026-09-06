@@ -26,6 +26,11 @@ int criu_target_set(pid_t pid)
 	if (!task)
 		return -ESRCH;
 	mutex_lock(&criu_target_lock);
+	if (criu_freeze_context_active()) {
+		mutex_unlock(&criu_target_lock);
+		put_task_struct(task);
+		return -EBUSY;
+	}
 	if (criu_target_task)
 		put_task_struct(criu_target_task);
 	criu_target_task = task;
