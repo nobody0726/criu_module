@@ -45,7 +45,7 @@
  #include <linux/errno.h>
  #include <linux/init_task.h>
  #include <linux/kernel.h>
-@@ -5566,4 +5566,208 @@ int cgroup_rmdir(struct kernfs_node *kn)
+@@ -5566,5 +5566,207 @@ int cgroup_rmdir(struct kernfs_node *kn)
  
  	cgroup_kn_unlock(kn);
  	return ret;
