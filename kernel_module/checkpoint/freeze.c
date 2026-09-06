@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/errno.h>
-#include <linux/criu_freezer.h>
+#include "criu_freezer.h"
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/moduleparam.h>
