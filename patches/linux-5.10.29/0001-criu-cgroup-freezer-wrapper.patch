@@ -45,12 +45,7 @@
  #include <linux/errno.h>
  #include <linux/init_task.h>
  #include <linux/kernel.h>
-@@ -5566,5 +5566,207 @@ int cgroup_rmdir(struct kernfs_node *kn)
- 
- 	cgroup_kn_unlock(kn);
- 	return ret;
- }
- 
+@@ -5571,0 +5571,202 @@ int cgroup_rmdir(struct kernfs_node *kn)
 +/*
 + * A narrow in-kernel cgroup-v2 freezer boundary for CRIU's out-of-tree
 + * module.  The module must not depend on cgroup-internal.h: cgroup creation,
