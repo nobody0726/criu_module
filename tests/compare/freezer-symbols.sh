@@ -32,16 +32,36 @@ if ! grep -q ' /sys/kernel/debug ' /proc/mounts; then
 fi
 
 CGROUP_ROOT=/sys/fs/cgroup
-mkdir -p "$CGROUP_ROOT"
+mkdir -p "$CGROUP_ROOT" || blocked "cannot create $CGROUP_ROOT"
 if ! grep -q " $CGROUP_ROOT cgroup2 " /proc/mounts; then
 	mount -t cgroup2 none "$CGROUP_ROOT" 2>/dev/null ||
 		blocked "cannot mount cgroup2 at $CGROUP_ROOT"
 fi
 
-[ -r "$CGROUP_ROOT/cgroup.controllers" ] ||
-	blocked "cgroup2 controller list is unreadable"
-grep -qw freezer "$CGROUP_ROOT/cgroup.controllers" ||
-	blocked "cgroup2 freezer controller is unavailable"
+[ -r "$CGROUP_ROOT/cgroup.freeze" ] ||
+	blocked "cgroup2 freezer file is unavailable"
+[ -r "$CGROUP_ROOT/cgroup.events" ] ||
+	blocked "cgroup2 events file is unavailable"
+
+PROBE_CGROUP="$CGROUP_ROOT/criu-a2-probe.$$"
+mkdir "$PROBE_CGROUP" || blocked "cannot create probe cgroup"
+cleanup_probe() {
+	echo 0 >"$PROBE_CGROUP/cgroup.freeze" 2>/dev/null || true
+	rmdir "$PROBE_CGROUP" 2>/dev/null || true
+}
+trap cleanup_probe EXIT HUP INT TERM
+[ -w "$PROBE_CGROUP/cgroup.freeze" ] || blocked "probe cgroup.freeze is not writable"
+[ -r "$PROBE_CGROUP/cgroup.events" ] || blocked "probe cgroup.events is unreadable"
+grep -q 'frozen 0' "$PROBE_CGROUP/cgroup.events" ||
+	blocked "probe cgroup starts frozen"
+echo 1 >"$PROBE_CGROUP/cgroup.freeze" ||
+	blocked "cannot freeze probe cgroup"
+grep -q 'frozen 1' "$PROBE_CGROUP/cgroup.events" ||
+	blocked "probe cgroup did not report frozen"
+echo 0 >"$PROBE_CGROUP/cgroup.freeze" ||
+	blocked "cannot thaw probe cgroup"
+grep -q 'frozen 0' "$PROBE_CGROUP/cgroup.events" ||
+	blocked "probe cgroup did not report thawed"
 
 config_file=
 for candidate in \
@@ -65,7 +85,7 @@ config_value() {
 }
 
 if [ -n "${config_file:-}" ]; then
-	for key in CONFIG_CGROUP_FREEZER CONFIG_FREEZER; do
+	for key in CONFIG_CGROUPS CONFIG_FREEZER; do
 		if ! config_value "$key" >/dev/null 2>&1; then
 			blocked "$key is disabled in $config_file"
 		fi

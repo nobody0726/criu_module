@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * A2 feasibility probe for the Linux 5.10.29 cgroup-v2 freezer API.
  *
@@ -10,6 +10,16 @@
 #include <linux/cgroup.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+
+/* Linux 5.10 keeps these declarations in cgroup-internal.h.  Repeating the
+ * source-verified prototypes lets modpost distinguish API visibility from a
+ * plain compile failure in this isolated probe. */
+extern int cgroup_freeze(struct cgroup *cgrp, bool freeze);
+extern void cgroup_freezer_migrate_task(struct task_struct *task,
+						struct cgroup *src_cgrp,
+						struct cgroup *dst_cgrp);
+extern void cgroup_enter_frozen(void);
+extern void cgroup_leave_frozen(bool always);
 
 static bool invoke_probe;
 module_param_named(invoke, invoke_probe, bool, 0400);
