@@ -23,8 +23,9 @@ fail() {
 # ---------------------------------------------------------------------------
 [ "$(id -u)" = "0" ] || fail "must run as root inside the guest"
 [ -d /sys/kernel/debug ] || mkdir -p /sys/kernel/debug
-mountpoint -q /sys/kernel/debug 2>/dev/null || mount -t debugfs none /sys/kernel/debug \
-	|| fail "cannot mount debugfs"
+if ! grep -q ' /sys/kernel/debug ' /proc/mounts; then
+	mount -t debugfs none /sys/kernel/debug || fail "cannot mount debugfs"
+fi
 
 KVER=$(uname -r)
 echo "SMOKE: kernel $KVER"
@@ -89,7 +90,7 @@ fi
 # A listed-but-missing script is a hard failure, not a skip: a gate that can
 # vanish silently is not a gate.
 # ---------------------------------------------------------------------------
-GATES=""
+GATES="tests/compare/target-lifecycle.sh tests/compare/diff-maps.sh tests/compare/a1-error-paths.sh"
 
 for g in $GATES; do
 	[ -f "$g" ] || fail "gate script $g is listed but missing"
@@ -98,7 +99,9 @@ for g in $GATES; do
 	dmesg_check "$g"
 done
 
-[ -n "$GATES" ] || echo "SMOKE: no comparison gates registered yet"
+if [ -z "$GATES" ]; then
+	echo "SMOKE: no comparison gates registered yet"
+fi
 
 # ---------------------------------------------------------------------------
 # Slab leak check: a dump that leaks one allocation per VMA is invisible in a

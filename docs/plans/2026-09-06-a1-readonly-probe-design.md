@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-06
 
-**Status:** Approved
+**Status:** Implemented (metadata/sample probe; no dump/restore image)
 
 ## Goal
 
@@ -37,7 +37,7 @@ the following order:
 3. `VM_SHARED` + `vm_file` + `inode->i_flags & S_PRIVATE` ->
    `CRIU_VMA_ANON_SHARED`. This is the path created by 5.10's
    `shmem_zero_setup()` for `MAP_SHARED|MAP_ANONYMOUS`.
-4. `VM_SHARED` + `vm_file` -> `CRIU_VMA_FILE_SHARED`.
+4. `VM_MAYSHARE` + `vm_file` -> `CRIU_VMA_FILE_SHARED`.
 5. `vm_file` -> `CRIU_VMA_FILE_PRIVATE`.
 6. Anything else -> `CRIU_VMA_UNSUPPORTED`.
 
@@ -123,8 +123,10 @@ Global target state is protected by a mutex and contains a pinned task reference
 and a monotonically increasing `generation`. Writing `target` resolves and pins a
 task before atomically replacing the old target; a failed lookup leaves the old
 target unchanged. Each `open()` captures the task reference and generation in its
-`seq_file` private data, so later target replacement cannot change an in-flight
-read. `release()` drops the reference.
+`seq_file` private data and materializes a bounded VMA metadata array before
+releasing `mmap_read_lock()`, so later target replacement cannot change an in-flight
+read. `release()` drops the reference. The generation is a target-selection token,
+not an identity for a page-content snapshot.
 
 `get_task_mm()` failure is reported as `-ESRCH`, including kernel threads and tasks
 that have completed `exit_mm()`. PID reuse is detected by the pinned task pointer
@@ -160,8 +162,9 @@ A1 reports every VMA and continues the walk:
 | IO/PFN/MIXEDMAP | special | skip | reject in A3 |
 | unknown combination | `UNKNOWN` | skip | reject in A3 |
 
-The A1 gate checks recognition and reporting. A3 separately requires
-`unsupported_count == 0` for its minimal fixture.
+The A1 gate checks recognition and reporting. A3 separately decides which special
+VMAs are dumpable; A1's `VM_DONTDUMP` value is diagnostic and is not itself a
+checkpoint policy decision.
 
 ## Test fixture and acceptance
 
@@ -190,6 +193,6 @@ The A1 comparison gate must cover:
 
 ## Approval boundary
 
-This document freezes the A1 design. The next artifact is an implementation plan
-with atomic tasks, file ownership, dependencies and verification commands. No A1
-source implementation begins until that plan is reviewed.
+The implementation is complete for the read-only scope. The next phase must add
+explicit synchronization/page-dump policy rather than treating this diagnostic text
+format as a CRIU image ABI.

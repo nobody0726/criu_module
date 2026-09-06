@@ -43,11 +43,11 @@ jobs:
       - name: Build module against 5.10.29
         run: make -C kernel_module KDIR="$HOME/kernels/linux-5.10.29"
 
-      - name: Boot QEMU and run module smoke test
+      - name: Boot QEMU and run A1 CI gates
         run: |
-          timeout 120s ./scripts/run-qemu.sh --ci --script tests/module-smoke.sh 2>&1 | tee qemu.log
-          if ! grep -q 'MODULE_SMOKE: PASS' qemu.log; then
-            echo "::error::guest module smoke test did not report PASS"
+          timeout 300s ./scripts/run-qemu.sh --ci --script tests/ci-smoke.sh 2>&1 | tee qemu.log
+          if ! grep -q 'CI_RESULT: PASS' qemu.log; then
+            echo "::error::guest A1 CI did not report PASS"
             exit 1
           fi
 

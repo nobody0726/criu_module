@@ -6,6 +6,26 @@
 > [03-memory-and-vma](../principles/03-memory-and-vma.md)、
 > [10-vma-semantics-and-attributes](../principles/10-vma-semantics-and-attributes.md)
 
+**实现状态:** 已在 `codex/a1-readonly-probe` 分支完成。A1 只提供检查元数据和
+best-effort 的单字节样本，不生成或恢复 CRIU 镜像。
+
+## 已实现的边界
+
+`criu_kernel.ko` 暴露 `/sys/kernel/debug/criu/target`、`task`、`maps`、
+`vmas_ext` 和 `status`。每次打开都要求 `CAP_SYS_ADMIN`，固定 task 引用和
+generation，并在释放 mmap 锁后使用有上限的 VMA 元数据数组。后续短读、seek
+都从这份数组读取，因此目标切换不会改变已经打开的 fd。
+
+`generation` 只标识目标替换，不承诺页内容或 VMA 拓扑在采集期间不变。样本在
+元数据采集后用 `get_user_pages_remote()` 读取，明确标记为 best-effort，可能
+触发缺页，也可能与目标进程并发变化。
+
+共享映射的 `/proc/maps` 标记按 `VM_MAYSHARE` 生成；`vmas_ext` 同时保留原始
+flag。基于 `S_PRIVATE` 的匿名共享分类是本项目的诊断启发式，不是 CRIU 镜像
+兼容性承诺。`PROT_NONE`、`VM_DONTDUMP`、vDSO/vvar、hugetlb、IO、PFNMAP
+和 MIXEDMAP 都会报告元数据；A1 只在适当情况下跳过样本，最终 dump 策略留给
+后续阶段决定。
+
 ---
 
 ## 1. 设计思路
@@ -35,11 +55,12 @@
 A1 的应对不是「冻结」(那是 A2),而是:
 
 - 目标程序 `known-layout.c` 在打印完地址后进 `pause()`,**自己不再动地址空间**
-- 全程持 `mmap_read_lock(mm)`,防止**别人**改
-- 读完立刻 `mmput()`
+- 先在 `mmap_read_lock(mm)` 下复制 VMA 元数据数组,再释放锁；后续 seq 读取不再
+  访问 VMA 链表
+- 用固定上限的快照承接短读、seek 和目标切换
 
-这样 A1 就能在不实现冻结的前提下拿到稳定结果。**把「稳定性」这个需求从「冻结机制」
-里剥离出来,是 A1 能独立成步的关键。**
+这样 A1 能在不实现冻结的前提下得到一次拓扑一致的元数据快照。它不保证页内容
+或下一次采集仍然相同；`generation` 只表示目标选择的替换。
 
 ### 输出格式:刻意模仿 `/proc/PID/maps`
 
@@ -211,7 +232,7 @@ struct task_struct *criu_get_task(pid_t vpid)
 ```c
 enum criu_vma_class criu_classify_vma(struct vm_area_struct *vma)
 {
-	bool shared = !!(vma->vm_flags & VM_SHARED);
+	bool shared = !!(vma->vm_flags & VM_MAYSHARE);
 
 	/* An anonymous shared mapping still has a vm_file -- shmem creates one
 	 * behind the scenes -- so vm_file alone cannot tell the two apart.
@@ -221,7 +242,7 @@ enum criu_vma_class criu_classify_vma(struct vm_area_struct *vma)
 
 	/* MAP_SHARED|MAP_ANONYMOUS uses shmem_zero_setup() in 5.10.29.
 	 * It creates an unlinked kernel-private shmem file (S_PRIVATE). */
-	if (shared && vma->vm_file &&
+	if ((vma->vm_flags & VM_SHARED) && vma->vm_file &&
 	    (file_inode(vma->vm_file)->i_flags & S_PRIVATE))
 		return CRIU_VMA_ANON_SHARED;
 

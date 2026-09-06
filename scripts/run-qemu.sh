@@ -81,7 +81,7 @@ QEMU_ARGS=(
 )
 
 if [ "$CI" = 1 ]; then
-	QEMU_ARGS[-1]="$QEMU_ARGS[-1] quiet_but_not_really"
+	QEMU_ARGS[-1]="${QEMU_ARGS[-1]} quiet_but_not_really"
 fi
 
 # KVM is unavailable on GitHub's standard runners (no nested virt), so CI
@@ -128,4 +128,8 @@ if [ -f "$STATUS_FILE" ]; then
 	esac
 fi
 
+if [ "$qemu_rc" -eq 0 ]; then
+	echo "guest did not report a completion status" >&2
+	exit 125
+fi
 exit "$qemu_rc"

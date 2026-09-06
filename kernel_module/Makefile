@@ -1,4 +1,6 @@
-obj-m += criu_probe.o
+obj-m += criu_kernel.o
+criu_kernel-y := core/main.o core/target.o checkpoint/vma_walk.o
+ccflags-y += -I$(src)/include
 
 KDIR ?= $(HOME)/kernels/linux-5.10.29
 PWD := $(shell pwd)
