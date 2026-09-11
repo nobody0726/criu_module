@@ -4,6 +4,12 @@
 /* A3 snapshot.bin on-disk ABI. All integer fields are little-endian. */
 #include <stdint.h>
 
+#if defined(__GNUC__)
+#define CRIU_SNAPSHOT_PACKED __attribute__((packed))
+#else
+#define CRIU_SNAPSHOT_PACKED
+#endif
+
 #define CRIU_SNAPSHOT_MAGIC 0x43524955534e5033ULL /* "CRIUSNP3" */
 #define CRIU_SNAPSHOT_VERSION 1U
 #define CRIU_SNAPSHOT_HEADER_SIZE 64U
@@ -13,6 +19,14 @@
 #define CRIU_SNAPSHOT_MAX_RECORDS 65536U
 #define CRIU_SNAPSHOT_MAX_RECORD_SIZE (64U * 1024U * 1024U)
 #define CRIU_SNAPSHOT_MAX_TOTAL_SIZE (1024ULL * 1024ULL * 1024ULL)
+#define CRIU_SNAPSHOT_HEADER_FLAGS 0U
+#define CRIU_SNAPSHOT_TLV_FLAGS 0U
+#define CRIU_SNAPSHOT_FOOTER_FLAGS 0U
+
+/* The serialized ABI is little-endian; big-endian producers are unsupported. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "criu_snapshot.bin requires a little-endian producer"
+#endif
 
 enum criu_snapshot_record_type {
 	CRIU_SNAPSHOT_REC_TASK = 1,
@@ -50,20 +64,32 @@ struct criu_snapshot_header {
 	uint32_t reserved;
 	uint64_t total_size;
 	uint64_t checksum;
-} __attribute__((packed));
+} CRIU_SNAPSHOT_PACKED;
 
 struct criu_snapshot_tlv {
 	uint16_t type;
 	uint16_t flags;
 	uint32_t reserved;
 	uint64_t length;
-} __attribute__((packed));
+} CRIU_SNAPSHOT_PACKED;
 
 struct criu_snapshot_footer {
 	uint64_t magic;
 	uint32_t version;
 	uint32_t record_count;
 	uint64_t checksum;
-} __attribute__((packed));
+} CRIU_SNAPSHOT_PACKED;
+
+#if defined(__cplusplus)
+static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
+static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
+static_assert(sizeof(struct criu_snapshot_footer) == CRIU_SNAPSHOT_FOOTER_SIZE, "snapshot footer ABI size");
+#else
+_Static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
+_Static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
+_Static_assert(sizeof(struct criu_snapshot_footer) == CRIU_SNAPSHOT_FOOTER_SIZE, "snapshot footer ABI size");
+#endif
+
+/* Checksum covers header with checksum field zeroed followed by all TLVs; footer is excluded. */
 
 #endif
