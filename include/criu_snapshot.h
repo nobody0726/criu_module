@@ -2,7 +2,15 @@
 #define CRIU_SNAPSHOT_H
 
 /* A3 snapshot.bin on-disk ABI. All integer fields are little-endian. */
+#ifdef __KERNEL__
+#include <linux/types.h>
+typedef __u8 uint8_t;
+typedef __u16 uint16_t;
+typedef __u32 uint32_t;
+typedef __u64 uint64_t;
+#else
 #include <stdint.h>
+#endif
 
 #if defined(__GNUC__)
 #define CRIU_SNAPSHOT_PACKED __attribute__((packed))
