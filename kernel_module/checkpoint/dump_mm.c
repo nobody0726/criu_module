@@ -3,6 +3,7 @@
 #include <linux/slab.h>
 
 #include "dump_mm.h"
+#include "page_scan.h"
 #include "criu_kernel.h"
 
 /* Policy rejects VM_SHARED, VM_HUGETLB, VM_IO, VM_PFNMAP and VM_MIXEDMAP
@@ -123,5 +124,8 @@ int criu_dump_mm(struct task_struct *task,
 	if (ret)
 		return ret;
 	ret = criu_walk_vmas(task, dump_one_vma, &ctx);
-	return ret == -EOPNOTSUPP ? -EOPNOTSUPP : ret;
+	if (ret)
+		return ret == -EOPNOTSUPP ? -EOPNOTSUPP : ret;
+	/* Scan only resident pages and emit inline PAGE_RUN records. */
+	return criu_dump_pages(task, writer);
 }
