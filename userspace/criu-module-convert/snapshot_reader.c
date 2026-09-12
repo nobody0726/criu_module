@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "snapshot_reader.h"
 #include "../../include/criu_snapshot.h"
 
@@ -41,7 +43,9 @@ static int known_type(uint16_t t){return t>=CRIU_SNAPSHOT_REC_TASK && t<=CRIU_SN
 int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 {
 	int fd; struct stat st; size_t got=0, off, body_end; uint32_t count=0; int saw_end=0; uint8_t digest[32]; struct sha256 sha; uint64_t expected;
-	if (!path || !doc) return SNAPSHOT_READER_FORMAT_ERROR; memset(doc,0,sizeof(*doc));
+	if (!path || !doc)
+		return SNAPSHOT_READER_FORMAT_ERROR;
+	memset(doc, 0, sizeof(*doc));
 	fd=open(path,O_RDONLY|O_CLOEXEC); if(fd<0)return SNAPSHOT_READER_IO_ERROR;
 	if(fstat(fd,&st)<0){close(fd);return SNAPSHOT_READER_IO_ERROR;}
 	if(st.st_size<0 || (uint64_t)st.st_size>CRIU_SNAPSHOT_MAX_TOTAL_SIZE){close(fd);return SNAPSHOT_READER_FORMAT_ERROR;}

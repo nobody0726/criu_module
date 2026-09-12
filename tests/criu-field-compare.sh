@@ -26,7 +26,7 @@ fail()
 [ "$(id -u)" = 0 ] || skip "must run as root in the guest"
 [ -f "$MODULE" ] || skip "module not found: $MODULE"
 [ -x "$CONVERTER" ] || {
-	make -C "$ROOT/userspace/criu-module-convert" >/dev/null 2>&1 ||
+	make -C "$ROOT/userspace/criu-module-convert" clean all >/dev/null 2>&1 ||
 		fail "cannot build $CONVERTER"
 }
 [ -x "$ROOT/tests/progs/minimal" ] ||
@@ -112,12 +112,15 @@ rmmod criu_kernel || fail "rmmod failed"
 MODULE_LOADED=0
 "$CONVERTER" "$TMP/snapshot.bin" -D "$OURS" || fail "snapshot conversion failed"
 
-IMAGES="inventory.img pstree.img core-$PID.img mm-$PID.img pagemap-1.img fdinfo-1.img fs-1.img creds-1.img reg-files.img"
+IMAGES="inventory.img pstree.img core-$PID.img mm-$PID.img pagemap-$PID.img files.img fdinfo-1.img fs-$PID.img creds-$PID.img reg-files.img"
 DIFF=0
 for image in $IMAGES; do
 	ref_image=$REF/$image
 	our_image=$OURS/$image
 	if [ ! -f "$ref_image" ]; then
+		# reg-files.img is a legacy compatibility image and is absent from
+		# current CRIU dumps, which place reg_file_entry inside files.img.
+		[ "$image" = reg-files.img ] && continue
 		echo "A3_FIELD_COMPARE: reference image missing: $image" >&2
 		DIFF=1
 		continue

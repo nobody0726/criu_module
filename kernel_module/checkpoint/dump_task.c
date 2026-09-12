@@ -90,6 +90,7 @@ int criu_dump_task(struct task_struct *task,
 			rec.rlimits[i][1] = task->signal->rlim[i].rlim_max;
 		}
 	}
+	get_task_comm(rec.comm, task);
 	if (!task_pt_regs(task))
 		return -EOPNOTSUPP;
 	memset(&regs, 0, sizeof(regs));

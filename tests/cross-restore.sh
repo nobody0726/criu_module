@@ -25,7 +25,7 @@ fail()
 [ "$(id -u)" = 0 ] || skip "must run as root in the guest"
 [ -f "$MODULE" ] || skip "module not found: $MODULE"
 [ -x "$CONVERTER" ] || {
-	make -C "$ROOT/userspace/criu-module-convert" >/dev/null 2>&1 ||
+	make -C "$ROOT/userspace/criu-module-convert" clean all >/dev/null 2>&1 ||
 		fail "cannot build $CONVERTER"
 }
 make -C "$ROOT/tests/progs" minimal >/dev/null 2>&1 ||
@@ -113,8 +113,8 @@ MODULE_LOADED=0
 # populate with more entries.
 for image in \
 	inventory.img pstree.img core-$PID.img mm-$PID.img pages-1.img \
-	pagemap-1.img files.img fdinfo-1.img reg-files.img ids-$PID.img \
-	fs-1.img creds-1.img; do
+	pagemap-$PID.img files.img fdinfo-1.img reg-files.img ids-$PID.img \
+	fs-$PID.img creds-$PID.img; do
 	[ -e "$IMAGES/$image" ] || fail "converter omitted $image"
 done
 

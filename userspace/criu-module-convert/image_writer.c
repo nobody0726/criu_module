@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "image_writer.h"
 
 #include <errno.h>
@@ -52,6 +54,15 @@ int image_writer_field_varint(struct image_writer *w, unsigned field, uint64_t v
 	return image_writer_varint(w, value);
 }
 
+int image_writer_field_sint64(struct image_writer *w, unsigned field, int64_t value)
+{
+	uint64_t encoded;
+
+	/* Use unsigned arithmetic so INT64_MIN never overflows. */
+	encoded = ((uint64_t)value << 1) ^ (uint64_t)-(value < 0);
+	return image_writer_field_varint(w, field, encoded);
+}
+
 int image_writer_field_bytes(struct image_writer *w, unsigned field,
 				 const void *data, size_t len)
 {
@@ -59,7 +70,8 @@ int image_writer_field_bytes(struct image_writer *w, unsigned field,
 		image_writer_varint(w, ((uint64_t)field << 3) | 2) ||
 		image_writer_varint(w, len) || reserve(w, len))
 		return -1;
-	memcpy(w->data + w->len, data, len);
+	if (len)
+		memcpy(w->data + w->len, data, len);
 	w->len += len;
 	return 0;
 }
@@ -84,28 +96,92 @@ static void put_le32(uint8_t out[4], uint32_t value)
 	out[3] = (uint8_t)(value >> 24);
 }
 
+static int open_temp(const char *path, char **tmp_out)
+{
+	char *tmp;
+	size_t n = strlen(path) + 5;
+	int fd;
+
+	if (n < strlen(path))
+		return -1;
+	tmp = malloc(n);
+	if (!tmp)
+		return -1;
+	if (snprintf(tmp, n, "%s.tmp", path) < 0) {
+		free(tmp);
+		return -1;
+	}
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		free(tmp);
+		return -1;
+	}
+	*tmp_out = tmp;
+	return fd;
+}
+
+static int finish_temp(int fd, char *tmp, const char *path, int ok)
+{
+	int ret = -1;
+
+	if (ok && fsync(fd) == 0 && close(fd) == 0 && rename(tmp, path) == 0)
+		ret = 0;
+	else
+		close(fd);
+	if (ret)
+		unlink(tmp);
+	free(tmp);
+	return ret;
+}
+
+int image_writer_write_messages(const char *path, const void *prefix, size_t prefix_len,
+					const struct image_writer *messages, size_t count)
+{
+	char *tmp = NULL;
+	int fd;
+	size_t i;
+	int ok = 0;
+
+	if (!path || (!prefix && prefix_len) || (!messages && count))
+		return -1;
+	fd = open_temp(path, &tmp);
+	if (fd < 0)
+		return -1;
+	if (write_all(fd, prefix, prefix_len))
+		return finish_temp(fd, tmp, path, 0);
+	for (i = 0; i < count; i++) {
+		uint8_t length[4];
+
+		if (messages[i].len > UINT32_MAX)
+			return finish_temp(fd, tmp, path, 0);
+		put_le32(length, (uint32_t)messages[i].len);
+		if (write_all(fd, length, sizeof(length)) ||
+			write_all(fd, messages[i].data, messages[i].len))
+			return finish_temp(fd, tmp, path, 0);
+	}
+	ok = 1;
+	return finish_temp(fd, tmp, path, ok);
+}
+
 int image_writer_write_file(const char *path, const void *prefix, size_t prefix_len,
 				   const struct image_writer *message)
 {
-	char *tmp;
-	int fd, ret = -1;
-	size_t n = strlen(path) + 5;
-	tmp = malloc(n);
-	if (!tmp) return -1;
-	if (snprintf(tmp, n, "%s.tmp", path) < 0) goto out;
-	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-	if (fd < 0) goto out;
-	uint8_t length[4];
-	put_le32(length, (uint32_t)message->len);
-	if (write_all(fd, prefix, prefix_len) == 0 && message->len <= UINT32_MAX &&
-		write_all(fd, length, sizeof(length)) == 0 &&
-		write_all(fd, message->data, message->len) == 0) {
-		if (fsync(fd) == 0 && close(fd) == 0 && rename(tmp, path) == 0) ret = 0;
-	} else {
-		close(fd);
-	}
-	if (ret) unlink(tmp);
-out:
-	free(tmp);
-	return ret;
+	if (!message)
+		return -1;
+	return image_writer_write_messages(path, prefix, prefix_len, message, 1);
+}
+
+int image_writer_write_raw_file(const char *path, const void *data, size_t len)
+{
+	char *tmp = NULL;
+	int fd;
+
+	if (!path || (!data && len))
+		return -1;
+	fd = open_temp(path, &tmp);
+	if (fd < 0)
+		return -1;
+	if (write_all(fd, data, len))
+		return finish_temp(fd, tmp, path, 0);
+	return finish_temp(fd, tmp, path, 1);
 }

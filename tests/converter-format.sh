@@ -6,7 +6,7 @@ bin="$root_dir/userspace/criu-module-convert/criu-module-convert"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-make -C "$root_dir/userspace/criu-module-convert" >/dev/null
+make -C "$root_dir/userspace/criu-module-convert" clean all >/dev/null
 cp "$root_dir/tests/fixtures/snapshot-minimal.bin" "$tmp/valid.bin"
 
 "$bin" "$tmp/valid.bin" -D "$tmp/images"

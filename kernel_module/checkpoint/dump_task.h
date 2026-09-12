@@ -25,6 +25,8 @@ struct criu_task_record {
 	__u8 pending[CRIU_TASK_SIG_BYTES];
 	__u8 shared_pending[CRIU_TASK_SIG_BYTES];
 	__u64 rlimits[RLIM_NLIMITS][2];
+	/* Optional A3 extension; older readers fall back to a stable name. */
+	char comm[TASK_COMM_LEN];
 } __attribute__((packed));
 
 struct criu_regs_record {

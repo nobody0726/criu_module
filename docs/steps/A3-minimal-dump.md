@@ -6,6 +6,8 @@
 > [03-memory-and-vma](../principles/03-memory-and-vma.md)、
 > [05-registers-and-sigframe](../principles/05-registers-and-sigframe.md)、
 > [10-vma-semantics-and-attributes](../principles/10-vma-semantics-and-attributes.md)
+>
+> 实施计划:[2026-09-11-a3-minimal-dump-implementation](../plans/2026-09-11-a3-minimal-dump-implementation.md)
 
 ---
 
@@ -658,6 +660,14 @@ grep -oE 'Unsupported|not supported|unhandled [a-z]+' /tmp/zdtm-all.log \
 
 ## 6. 完成标准
 
+### 当前实现状态(2026-09-12)
+
+Task 1-9 的 ABI、内核采集、用户态读取器、初版镜像转换器以及比较/恢复脚本已经
+提交到 `main`。Task 10 的 CI 接入也已完成，但 A3 **尚未完成**：当前转换器只生成
+可供开发测试的最小镜像骨架，尚未写出完整的 `core` 寄存器、`mm` 的 VMA 子消息、
+`files`/`ids`/`fdinfo` 交叉引用和 `PAGE_RUN`/`pagemap` 内容。因此在 Linux 5.10.29
+guest 中通过真实 `criu restore` 之前，不得把 A3 或 A 轨门禁标记为完成。
+
 - [ ] 14 个用例全部通过
 - [ ] `cross-restore.sh` 进 CI,绿
 - [ ] `ci/zdtm-allowlist.txt` 至少 3 个测试
@@ -665,6 +675,13 @@ grep -oE 'Unsupported|not supported|unhandled [a-z]+' /tmp/zdtm-all.log \
 - [ ] 用统计表确定 A4/A5/A6/A7 的实施顺序,更新 `03-Iteration-Plan.md`
 - [ ] dmesg 干净;`rmmod` 后无 slab 泄漏
 - [ ] 镜像格式没有任何自创字段(与 `criu/images/*.proto` 严格一致)
+
+### Task 10 验证记录(2026-09-13)
+
+宿主机验证已完成:转换器构建、格式/镜像契约、task/VMA/page/error 合约以及 shell
+语法检查均通过。`criu-field-compare.sh` 和 `cross-restore.sh` 在宿主机以非 root
+运行时按约定返回 `77` 跳过；本机没有可启动的 Linux 5.10.29 QEMU 资产，因此尚未
+获得 `A3_CROSS_RESTORE: PASS`。这属于环境限制，不作为 A3 完成证据。
 
 ## 7. 如果 restore 一直不通
 

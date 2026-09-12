@@ -99,6 +99,26 @@ for g in $GATES; do
 	dmesg_check "$g"
 done
 
+# A3 gates require CRIU/crit and a complete converter image path.  They are
+# hard gates when the module is present, but may report an explicit 77 skip in
+# reduced smoke environments that do not carry the guest CRIU toolchain.
+if [ -f "$MOD" ]; then
+	for g in tests/criu-field-compare.sh tests/cross-restore.sh; do
+		[ -f "$g" ] || fail "A3 gate $g is missing"
+		echo "SMOKE: === $g ==="
+		set +e
+		sh "$g"
+		rc=$?
+		set -e
+		case "$rc" in
+		0) ;;
+		77) echo "SMOKE: $g skipped by environment" ;;
+		*) fail "$g" ;;
+		esac
+		dmesg_check "$g"
+	done
+fi
+
 if [ -z "$GATES" ]; then
 	echo "SMOKE: no comparison gates registered yet"
 fi
