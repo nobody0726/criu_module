@@ -11,6 +11,7 @@
 #include <linux/uaccess.h>
 
 #include "criu_kernel.h"
+#include "../checkpoint/dump.h"
 
 static struct dentry *criu_root;
 
@@ -276,6 +277,32 @@ static const struct file_operations thaw_fops = {
 	.write = thaw_write,
 };
 
+static ssize_t dump_write(struct file *file, const char __user *buf,
+			  size_t count, loff_t *pos)
+{
+	char input[CRIU_PATH_MAX + 32];
+	char path[CRIU_PATH_MAX];
+	int pid, ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!count || count >= sizeof(input))
+		return -EINVAL;
+	if (copy_from_user(input, buf, count))
+		return -EFAULT;
+	input[count] = '\0';
+	memset(path, 0, sizeof(path));
+	if (sscanf(input, "%d %511s", &pid, path) != 2)
+		return -EINVAL;
+	ret = criu_dump_process(pid, path);
+	return ret ? ret : count;
+}
+
+static const struct file_operations dump_fops = {
+	.owner = THIS_MODULE,
+	.write = dump_write,
+};
+
 static ssize_t criu_view_read(struct file *file, char __user *buf,
 				      size_t size, loff_t *ppos)
 {
@@ -401,6 +428,8 @@ static int __init criu_init(void)
 				 &freeze_fops) ||
 	    !debugfs_create_file("thaw", 0200, criu_root, NULL,
 				 &thaw_fops) ||
+	    !debugfs_create_file("dump", 0200, criu_root, NULL,
+				 &dump_fops) ||
 	    !debugfs_create_file("task", 0400, criu_root, NULL, &task_fops) ||
 	    !debugfs_create_file("maps", 0400, criu_root, NULL, &maps_fops) ||
 	    !debugfs_create_file("vmas_ext", 0400, criu_root, NULL,

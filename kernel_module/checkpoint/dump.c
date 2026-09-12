@@ -1,0 +1,127 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#include <linux/errno.h>
+#include <linux/mm.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+
+#include "../../include/criu_snapshot.h"
+#include "criu_kernel.h"
+#include "dump.h"
+#include "dump_files.h"
+#include "dump_mm.h"
+#include "dump_task.h"
+#include "snapshot_writer.h"
+
+static int dump_revalidate(struct task_struct *task, u64 generation,
+				struct mm_struct *mm, unsigned long vma_count)
+{
+	struct task_struct *again;
+	struct mm_struct *again_mm;
+	struct criu_mm_info info;
+	u64 again_generation;
+	int ret = 0;
+
+	again = criu_target_get(&again_generation);
+	if (!again)
+		return -ESRCH;
+	if (again != task || task_pid_vnr(again) != task_pid_vnr(task) ||
+	    again_generation != generation)
+		ret = -EAGAIN;
+	again_mm = get_task_mm(again);
+	if (!ret && (!again_mm || again_mm != mm))
+		ret = -EAGAIN;
+	if (!ret && criu_collect_mm_info(again, &info))
+		ret = -EAGAIN;
+	if (!ret && info.vma_count != vma_count)
+		ret = -EAGAIN;
+	if (again_mm)
+		mmput(again_mm);
+	put_task_struct(again);
+	return ret;
+}
+
+int criu_dump_process(pid_t vpid, const char *path)
+{
+	struct task_struct *task = NULL;
+	struct mm_struct *mm = NULL;
+	struct criu_mm_info mm_info;
+	struct criu_snapshot_header header;
+	struct criu_snapshot_writer writer;
+	struct criu_freeze_ctx *freeze_ctx = NULL;
+	u64 generation;
+	int ret, thaw_ret;
+	bool opened = false;
+
+	if (vpid <= 0 || !path || !*path)
+		return -EINVAL;
+
+	/* Bind the operation to the selected target and its A2 generation. */
+	task = criu_target_get(&generation);
+	if (!task || task_pid_vnr(task) != vpid) {
+		if (task)
+			put_task_struct(task);
+		return -ESRCH;
+	}
+	mm = get_task_mm(task);
+	if (!mm) {
+		put_task_struct(task);
+		return -ESRCH;
+	}
+	ret = criu_collect_mm_info(task, &mm_info);
+	if (ret)
+		goto out;
+
+	ret = criu_freeze(vpid, false, &freeze_ctx);
+	if (ret)
+		goto out;
+
+	memset(&header, 0, sizeof(header));
+	header.magic = CRIU_SNAPSHOT_MAGIC;
+	header.version = CRIU_SNAPSHOT_VERSION;
+	header.header_size = CRIU_SNAPSHOT_HEADER_SIZE;
+	header.flags = CRIU_SNAPSHOT_HEADER_FLAGS;
+#ifdef CONFIG_ARM64
+	header.arch = 183; /* EM_AARCH64 */
+#elif defined(CONFIG_X86_64)
+	header.arch = 62; /* EM_X86_64 */
+#else
+	header.arch = 0;
+#endif
+	header.page_size = PAGE_SIZE;
+	header.pid = task_pid_vnr(task);
+	header.tgid = task_tgid_vnr(task);
+	header.freeze_generation = generation;
+
+	ret = criu_snapshot_writer_open(&writer, path, &header);
+	if (ret)
+		goto thaw;
+	opened = true;
+	ret = criu_dump_task(task, &writer);
+	if (!ret)
+		ret = criu_dump_mm(task, &writer);
+	if (!ret)
+		ret = criu_dump_files(task, &writer);
+	if (!ret)
+		ret = dump_revalidate(task, generation, mm, mm_info.vma_count);
+	if (!ret)
+		ret = criu_snapshot_writer_record(&writer, CRIU_SNAPSHOT_REC_END,
+						 0, NULL, 0);
+	if (!ret)
+		ret = criu_snapshot_writer_finish(&writer);
+	if (ret && opened)
+		criu_snapshot_writer_abort(&writer);
+
+thaw:
+	/* Thaw is unconditional once freeze succeeded, including writer failures. */
+	thaw_ret = criu_thaw(freeze_ctx);
+	if (!ret && thaw_ret)
+		ret = thaw_ret;
+out:
+	if (mm)
+		mmput(mm);
+	if (task)
+		put_task_struct(task);
+	return ret;
+}
