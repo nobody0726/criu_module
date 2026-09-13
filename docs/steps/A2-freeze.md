@@ -389,4 +389,24 @@ sh tests/compare/freeze-test.sh || exit 1
 - [x] debugfs `freeze` / `thaw` / `status` 控制面与回滚 gate
 - [ ] descendants/tree freezing（后续阶段）
 - [ ] 超时路径有测试覆盖,不是只在代码里存在
-- [ ] `freeze-test.sh` 进 CI,绿
+- [x] `freeze-test.sh` 已进入 QEMU smoke 并通过
+
+### Smoke 修复记录(2026-09-14)
+
+`tests/compare/freeze-test.sh` 曾使总 smoke 看起来卡在 A2。实际是两个问题叠加：
+
+1. 它错误地比较冻结请求前和冻结完成后的 CPU tick；这段时间目标本来可以继续运行，
+   因此会误判一个正常冻结为失败。
+2. 失败后的 `EXIT` trap 直接对仍在 cgroup freezer 中的目标 `kill` 并 `wait`。目标无法
+   被调度来处理该信号，故 `wait` 无界阻塞。
+
+修复后，运行性在 freeze 前的采样窗口验证，静止性只在 `freeze` 同步成功后的采样窗口
+验证；所有 A2 fixture 的清理都先尝试 `thaw`，再终止和等待子进程。该过程还暴露并修复了
+`criu_freeze_capture_tasks()` 对 group leader 的重复枚举：Linux 5.10 的
+`for_each_thread()` 包含 leader，模块原先手动加入 leader 后又将其计入一次，导致单线程
+任务错误报告 `freeze_task_count=2`。
+
+在 Lima `criu-dev` 的 Linux 5.10.29 QEMU guest 中，`freeze-test.sh`、
+`freeze-stopped.sh`、`freeze-errors.sh` 和 `freeze-rollback.sh` 均通过，且每个 gate 后的
+dmesg 检查干净。总 smoke 现已越过 A2；其当前失败点是 A3 的严格
+`criu-field-compare.sh`，不是 freezer。

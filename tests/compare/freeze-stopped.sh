@@ -8,6 +8,7 @@ insmod ./kernel_module/criu_kernel.ko
 pid=0
 cleanup()
 {
+	[ -e "$ROOT/thaw" ] && printf '1\n' > "$ROOT/thaw" 2>/dev/null || true
 	[ "$pid" -gt 0 ] && kill -CONT "$pid" 2>/dev/null || true
 	[ "$pid" -gt 0 ] && kill "$pid" 2>/dev/null || true
 	[ "$pid" -gt 0 ] && wait "$pid" 2>/dev/null || true

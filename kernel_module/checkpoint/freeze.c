@@ -116,8 +116,12 @@ static int criu_freeze_capture_tasks(struct criu_freeze_ctx *ctx)
 	struct criu_freeze_task *tasks;
 
 	rcu_read_lock();
-	for_each_thread(ctx->target, thread)
+	for_each_thread(ctx->target, thread) {
+		/* thread_head includes the leader, which is counted below. */
+		if (thread == ctx->target)
+			continue;
 		count++;
+	}
 	rcu_read_unlock();
 
 	tasks = kcalloc(count, sizeof(*tasks), GFP_KERNEL);
@@ -140,6 +144,8 @@ static int criu_freeze_capture_tasks(struct criu_freeze_ctx *ctx)
 	get_task_struct(ctx->target);
 	i++;
 	for_each_thread(ctx->target, thread) {
+		if (thread == ctx->target)
+			continue;
 		if (i == count)
 			break;
 		tasks[i].task = thread;

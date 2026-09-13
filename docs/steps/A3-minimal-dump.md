@@ -668,9 +668,12 @@ TLS、匿名 VMA `pgoff` 和 Lima 9p 根目录模式问题也已修复。2026-09
 `tests/cross-restore.sh`，每次都输出 `A3_CROSS_RESTORE: PASS`；恢复后的目标进程
 保持存活并继续推进 tick。因此 A3 的核心 dump→真实 CRIU restore 闭环已经通过。
 
-完整里程碑尚未封板：Task 10 的总 smoke 入口仍会在 A2 `freeze-test.sh` 处长时间阻塞，
-ZDTM shim 已实现但尚未有正式 allowlist 条目，14 个扩展用例和全量 ZDTM 失败统计也
-尚未完成。后续工作可以跳过该总 smoke，独立推进 ZDTM 和扩展用例。
+完整里程碑尚未封板：2026-09-14 已修复 A2 `freeze-test.sh` 的清理死锁及 leader 重复
+计数，总 smoke 可以通过全部 A2 freezer gate。它当前停在 A3 的严格
+`criu-field-compare.sh`：本模块镜像与参考 CRIU 镜像仍有 inventory、core、mm、pagemap、
+files 和 fs 的字段差异。该比较失败不改变已验证的真实 `criu restore` 核心门禁，但必须
+作为独立的 A3 镜像语义工作处理。ZDTM shim 已实现但尚未有正式 allowlist 条目，14 个
+扩展用例和全量 ZDTM 失败统计也尚未完成。
 
 - [ ] 14 个用例全部通过
 - [x] `cross-restore.sh` 在独立 Lima+QEMU gate 中连续三次通过

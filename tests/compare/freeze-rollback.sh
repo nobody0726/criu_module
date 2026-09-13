@@ -8,6 +8,7 @@ insmod ./kernel_module/criu_kernel.ko settle_timeout_ms=0
 pid=0
 cleanup()
 {
+	[ -e "$ROOT/thaw" ] && printf '1\n' > "$ROOT/thaw" 2>/dev/null || true
 	[ "$pid" -gt 0 ] && kill "$pid" 2>/dev/null || true
 	[ "$pid" -gt 0 ] && wait "$pid" 2>/dev/null || true
 	rmmod criu_kernel 2>/dev/null || true
