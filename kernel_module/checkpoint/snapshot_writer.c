@@ -48,17 +48,18 @@ static int unlink_path(const char *path)
 	ret = kern_path(*copy ? copy : "/", LOOKUP_PARENT, &parent);
 	if (ret)
 		goto out;
+	inode_lock(parent.dentry->d_inode);
 	dentry = lookup_one_len(name, parent.dentry, strlen(name));
 	if (IS_ERR(dentry)) {
 		ret = PTR_ERR(dentry);
+		inode_unlock(parent.dentry->d_inode);
 		path_put(&parent);
 		goto out;
 	}
 	if (d_really_is_positive(dentry)) {
-		inode_lock(parent.dentry->d_inode);
 		ret = vfs_unlink(parent.dentry->d_inode, dentry, NULL);
-		inode_unlock(parent.dentry->d_inode);
 	}
+	inode_unlock(parent.dentry->d_inode);
 	dput(dentry);
 	path_put(&parent);
 out:
@@ -91,8 +92,10 @@ static int rename_atomic(const char *old_name, const char *new_name)
 	if (ret) goto out_free;
 	ret = kern_path(*new_copy ? new_copy : "/", LOOKUP_PARENT, &new_parent);
 	if (ret) { path_put(&old_parent); goto out_free; }
-	old_dentry = lookup_one_len(old_base, old_parent.dentry, strlen(old_base));
-	new_dentry = lookup_one_len(new_base, new_parent.dentry, strlen(new_base));
+	old_dentry = lookup_one_len_unlocked(old_base, old_parent.dentry,
+					     strlen(old_base));
+	new_dentry = lookup_one_len_unlocked(new_base, new_parent.dentry,
+					     strlen(new_base));
 	if (IS_ERR(old_dentry) || IS_ERR(new_dentry)) {
 		ret = -ENOENT;
 		if (!IS_ERR(old_dentry)) dput(old_dentry);
@@ -199,6 +202,8 @@ int criu_snapshot_writer_finish(struct criu_snapshot_writer *w)
 	if (!w || !w->file || !w->ended ||
 	    w->total_size > CRIU_SNAPSHOT_MAX_TOTAL_SIZE - CRIU_SNAPSHOT_FOOTER_SIZE)
 		return -EINVAL;
+	pr_info("criu_writer: finish begin path=%s size=%llu\n", w->path,
+		(unsigned long long)w->total_size);
 	h = w->header;
 	h.record_count = w->record_count;
 	h.total_size = w->total_size + sizeof(f);
@@ -207,6 +212,7 @@ int criu_snapshot_writer_finish(struct criu_snapshot_writer *w)
 	ret = write_all(w->file, &pos, &h, sizeof(h));
 	if (ret) return ret;
 	ret = sha256_file(w->file, &digest);
+	pr_info("criu_writer: hash ret=%d\n", ret);
 	if (ret) return ret;
 	h.checksum = digest;
 	pos = offsetof(struct criu_snapshot_header, checksum);
@@ -218,8 +224,11 @@ int criu_snapshot_writer_finish(struct criu_snapshot_writer *w)
 	ret = write_all(w->file, &pos, &f, sizeof(f));
 	if (ret) return ret;
 	vfs_fsync(w->file, 0);
+	pr_info("criu_writer: fsync done\n");
 	filp_close(w->file, NULL); w->file = NULL;
+	pr_info("criu_writer: close done, renaming\n");
 	ret = rename_atomic(w->tmp_path, w->path);
+	pr_info("criu_writer: rename ret=%d\n", ret);
 	if (ret) { unlink_path(w->tmp_path); return ret; }
 	kfree(w->tmp_path); kfree(w->path); w->tmp_path = NULL; w->path = NULL;
 	return 0;

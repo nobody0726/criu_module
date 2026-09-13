@@ -14,11 +14,34 @@
 # test cannot tell a comment-only file from a populated one.
 set -eu
 
-CRIU_SRC=${CRIU_SRC:-./criu}
-A_LIST=${A_LIST:-./ci/zdtm-allowlist.txt}
-B_LIST=${B_LIST:-./ci/zdtm-restore-allowlist.txt}
-A_SHIM=${A_SHIM:-./userspace/criu-shim/criu-shim}
-B_SHIM=${B_SHIM:-./userspace/mini-restore/restore-shim}
+# ZDTM changes uid/gid and creates setuid test files.  A 9p project mount is
+# intentionally unsuitable for that, so run the suite from a guest-local
+# copy while retaining the host mount only as the input artifact source.
+HOST_PROJECT_ROOT=$(pwd)
+LOCAL_ROOT=${ZDTM_LOCAL_ROOT:-/tmp/criu-zdtm-run}
+rm -rf "$LOCAL_ROOT"
+mkdir -p "$LOCAL_ROOT"
+cp -a "$HOST_PROJECT_ROOT/criu" "$LOCAL_ROOT/criu"
+cp -a "$HOST_PROJECT_ROOT/userspace" "$LOCAL_ROOT/userspace"
+cp -a "$HOST_PROJECT_ROOT/kernel_module" "$LOCAL_ROOT/kernel_module"
+cp -a "$HOST_PROJECT_ROOT/ci" "$LOCAL_ROOT/ci"
+
+CRIU_SRC=${CRIU_SRC:-$LOCAL_ROOT/criu}
+PROJECT_ROOT=$LOCAL_ROOT
+A_LIST=${A_LIST:-$LOCAL_ROOT/ci/zdtm-allowlist.txt}
+B_LIST=${B_LIST:-$LOCAL_ROOT/ci/zdtm-restore-allowlist.txt}
+A_SHIM=${A_SHIM:-$LOCAL_ROOT/userspace/criu-shim/criu-shim}
+B_SHIM=${B_SHIM:-$LOCAL_ROOT/userspace/mini-restore/restore-shim}
+MODULE=${MODULE:-$LOCAL_ROOT/kernel_module/criu_kernel.ko}
+export CRIU_CONVERTER=${CRIU_CONVERTER:-$PROJECT_ROOT/userspace/criu-module-convert/criu-module-convert}
+export CRIU_REAL_BIN=${CRIU_REAL_BIN:-$PROJECT_ROOT/criu/criu/criu}
+# The minimal guest mounts Lima's /usr but not /etc.  On Ubuntu, /usr/bin/cc
+# points through /etc/alternatives, while gcc is a self-contained sibling link.
+export CC=${CC:-/usr/bin/gcc}
+# The initramfs provides GNU rm at /usr/bin.  ZDTM's Makefiles use an
+# immediately-assigned RM variable, so ask make to honor this explicit path.
+export RM=${RM:-/usr/bin/rm -f --one-file-system}
+export MAKEFLAGS="${MAKEFLAGS:-} -e"
 
 fail() {
 	echo "ZDTM: $*" >&2
@@ -61,6 +84,10 @@ run_track() {
 	[ -x "$shim" ] || fail "[$label] allowlist has $n entries but $shim is missing or not executable"
 
 	echo "ZDTM: [$label] $n test(s) via $shim"
+	case "$shim" in
+	/*) shim_path="$shim" ;;
+	*) shim_path="$PROJECT_ROOT/$shim" ;;
+	esac
 
 	entries "$list" | while read -r t; do
 		echo "ZDTM: [$label] --- $t"
@@ -68,7 +95,8 @@ run_track() {
 		# calls it wherever it would call criu, so the shim decides which
 		# half is ours and which half is the oracle.
 		if (cd "$CRIU_SRC/test" && \
-		    timeout 300 ./zdtm.py run -t "$t" --criu-bin "$OLDPWD/$shim" -f h); then
+		    timeout 300 ./zdtm.py run -t "$t" --criu-bin "$shim_path" \
+			--ignore-taint -f h); then
 			echo "ZDTM: [$label] PASS $t"
 		else
 			rc=$?
@@ -87,8 +115,17 @@ run_track() {
 
 rm -f /tmp/zdtm-failed.txt
 
+if [ "$(entries "$A_LIST" | wc -l | tr -d ' ')" != "0" ]; then
+	[ -f "$MODULE" ] || fail "[dump] module is missing: $MODULE"
+	insmod "$MODULE" || fail "[dump] cannot load module"
+	trap 'rmmod criu_kernel 2>/dev/null || true' EXIT HUP INT TERM
+fi
+
 run_track "dump" "$A_LIST" "$A_SHIM"
 run_track "restore" "$B_LIST" "$B_SHIM"
+
+rmmod criu_kernel 2>/dev/null || true
+trap - EXIT HUP INT TERM
 
 if [ -s /tmp/zdtm-failed.txt ]; then
 	echo "ZDTM: failures:" >&2

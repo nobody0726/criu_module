@@ -5,6 +5,7 @@
 #include <linux/jiffies.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
+#include <linux/printk.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
@@ -125,6 +126,10 @@ static int criu_freeze_capture_tasks(struct criu_freeze_ctx *ctx)
 
 	rcu_read_lock();
 	if (ctx->target->flags & PF_EXITING) {
+		pr_info("criu_freeze: capture target exiting pid=%d tgid=%d state=%ld flags=0x%lx\n",
+			task_pid_vnr(ctx->target), task_tgid_vnr(ctx->target),
+			READ_ONCE(ctx->target->state),
+			(unsigned long)READ_ONCE(ctx->target->flags));
 		rcu_read_unlock();
 		kfree(tasks);
 		return -ESRCH;
@@ -146,6 +151,8 @@ static int criu_freeze_capture_tasks(struct criu_freeze_ctx *ctx)
 	rcu_read_unlock();
 
 	if (i != count) {
+		pr_info("criu_freeze: capture thread count changed expected=%u actual=%u target_pid=%d\n",
+			count, i, task_pid_vnr(ctx->target));
 		while (i)
 			put_task_struct(tasks[--i].task);
 		kfree(tasks);
@@ -200,9 +207,13 @@ int criu_freeze(pid_t vpid, bool include_children,
 	 * movement and settled detection are added by later A2 tasks.
 	 */
 	criu_freeze_current = new_ctx;
+	new_ctx->state = CRIU_FREEZE_FREEZING;
 	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_FREEZING);
 	target = criu_target_get(&generation);
 	if (!target || task_pid_vnr(target) != vpid) {
+		pr_info("criu_freeze: target lookup failed requested=%d target=%p target_pid=%d generation=%llu\n",
+			vpid, target, target ? task_pid_vnr(target) : -1,
+			generation);
 		if (target)
 			put_task_struct(target);
 		criu_freeze_current = NULL;
@@ -241,6 +252,9 @@ int criu_freeze(pid_t vpid, bool include_children,
 					     sizeof(new_ctx->original_cgroup),
 					     new_ctx->temporary_cgroup,
 					     sizeof(new_ctx->temporary_cgroup));
+	pr_info("criu_freeze: cgroup freeze pid=%d ret=%d cookie=%p original=%s temporary=%s\n",
+		vpid, ret, new_ctx->cgroup_cookie, new_ctx->original_cgroup,
+		new_ctx->temporary_cgroup);
 	if (ret) {
 		criu_freeze_release_tasks(new_ctx);
 		put_task_struct(target);
@@ -255,9 +269,15 @@ int criu_freeze(pid_t vpid, bool include_children,
 	{
 		unsigned long deadline = jiffies +
 			msecs_to_jiffies(settle_timeout_ms);
+		unsigned int settle_loops = 0;
 
 		while (settle_timeout_ms != 0 &&
 		       !criu_freeze_settled_locked(new_ctx)) {
+			if (!(settle_loops++ % 100))
+				pr_info("criu_freeze: settle pending pid=%d state=%ld on_cpu=%d loops=%u remaining=%ld\n",
+					vpid, READ_ONCE(new_ctx->tasks[0].task->state),
+					READ_ONCE(new_ctx->tasks[0].task->on_cpu), settle_loops,
+					(long)(deadline - jiffies));
 			if (time_after_eq(jiffies, deadline)) {
 				criu_freeze_last_error = -ETIMEDOUT;
 				ret = criu_freeze_rollback_locked(new_ctx);

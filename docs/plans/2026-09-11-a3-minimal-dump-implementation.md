@@ -6,7 +6,7 @@
 
 **Architecture:** The kernel module freezes the target through A2, collects normalized task/mm/VMA/page/file state into one versioned TLV snapshot, validates consistency, and atomically commits it. A user-space converter validates the snapshot and emits the repository CRIU protobuf image set; CRIU remains responsible for restore.
 
-**Tech Stack:** Linux 5.10.29 out-of-tree module, C, kernel file/page APIs, CRIU protobuf-c definitions, `crit`, shell integration tests, Lima guest validation.
+**Tech Stack:** Linux 5.10.29 out-of-tree module, C, kernel file/page APIs, CRIU protobuf-c definitions, `crit`, shell integration tests, and a two-level Lima+QEMU validation environment. Lima `criu-dev` is the build/orchestration guest; the nested disposable QEMU guest booted by `scripts/run-qemu.sh` is the only environment allowed to load the module or run kernel tests.
 
 ---
 
@@ -349,13 +349,21 @@ memory markers. Add comparison diagnostics and the final `criu restore` command.
 
 **Step 4: Run test to verify it passes**
 
-Run in the Lima guest with the prepared Linux 5.10.29 tree:
+Run from the macOS host by dispatching the command into the Lima `criu-dev` build guest; the command then starts the disposable Linux 5.10.29 QEMU guest. Do not run `cross-restore.sh` directly in Lima, because Lima's kernel is the build/orchestration kernel (normally 5.15), not the target 5.10.29 test kernel:
 
 ```bash
-limactl shell criu-dev bash -lc 'cd /home/yhome.guest/criu_module && bash tests/cross-restore.sh'
+limactl shell criu-dev bash -lc 'cd /Users/yhome/workspace/source_code/criu_module && ./scripts/run-qemu.sh --ci --script tests/cross-restore.sh'
 ```
 
-Expected: `A3_CROSS_RESTORE: PASS`.
+Expected: `A3_CROSS_RESTORE: PASS`. The 5.10.29 `Image` and initramfs must exist inside the Lima guest under `$HOME/kernels` (for this guest, `/home/yhome.guest/kernels`).
+
+**Restore-path invariant:** The target starts with cwd/root `/`, so the guest
+initramfs root must be mode `0755`. Keep all generated snapshot and CRIU images
+under guest-local `/tmp`, never `/mnt/host`; invoke restore with `(cd / && ...)`
+and absolute image paths. This preserves CRIU's default file-mode validation
+without `--skip-file-rwx-check`. The snapshot stores `vm_pgoff` in pages, while
+the emitted CRIU `vma_entry.pgoff` must be converted to bytes using the snapshot
+page size.
 
 **Step 5: Commit**
 
@@ -376,8 +384,8 @@ git commit -m "test: add A3 CRIU comparison and restore gate"
 ```bash
 git diff --check
 for f in tests/*.sh tests/compare/*.sh; do bash -n "$f"; done
-limactl shell criu-dev bash -lc 'make -C /home/yhome.guest/kernels/verify-a3-kernel M=/home/yhome.guest/criu_module/kernel_module modules'
-limactl shell criu-dev bash -lc 'cd /home/yhome.guest/criu_module && bash tests/ci-smoke.sh'
+limactl shell criu-dev bash -lc 'make -C /home/yhome.guest/kernels/verify-a3-kernel M=/Users/yhome/workspace/source_code/criu_module/kernel_module modules'
+limactl shell criu-dev bash -lc 'cd /Users/yhome/workspace/source_code/criu_module && ./scripts/run-qemu.sh --ci --script tests/ci-smoke.sh'
 ```
 
 Expected: build succeeds, shell checks pass, all A3 contract gates emit PASS,

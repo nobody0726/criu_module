@@ -660,16 +660,20 @@ grep -oE 'Unsupported|not supported|unhandled [a-z]+' /tmp/zdtm-all.log \
 
 ## 6. 完成标准
 
-### 当前实现状态(2026-09-12)
+### 当前实现状态(2026-09-13)
 
-Task 1-9 的 ABI、内核采集、用户态读取器、初版镜像转换器以及比较/恢复脚本已经
-提交到 `main`。Task 10 的 CI 接入也已完成，但 A3 **尚未完成**：当前转换器只生成
-可供开发测试的最小镜像骨架，尚未写出完整的 `core` 寄存器、`mm` 的 VMA 子消息、
-`files`/`ids`/`fdinfo` 交叉引用和 `PAGE_RUN`/`pagemap` 内容。因此在 Linux 5.10.29
-guest 中通过真实 `criu restore` 之前，不得把 A3 或 A 轨门禁标记为完成。
+Task 1-9 的 ABI、内核采集、用户态读取器、镜像转换器以及比较/恢复脚本已经实现。
+TLS、匿名 VMA `pgoff` 和 Lima 9p 根目录模式问题也已修复。2026-09-13 在 Lima
+`criu-dev` 中启动真实 Linux 5.10.29 QEMU guest，连续三次运行
+`tests/cross-restore.sh`，每次都输出 `A3_CROSS_RESTORE: PASS`；恢复后的目标进程
+保持存活并继续推进 tick。因此 A3 的核心 dump→真实 CRIU restore 闭环已经通过。
+
+完整里程碑尚未封板：Task 10 的总 smoke 入口仍会在 A2 `freeze-test.sh` 处长时间阻塞，
+ZDTM shim 已实现但尚未有正式 allowlist 条目，14 个扩展用例和全量 ZDTM 失败统计也
+尚未完成。后续工作可以跳过该总 smoke，独立推进 ZDTM 和扩展用例。
 
 - [ ] 14 个用例全部通过
-- [ ] `cross-restore.sh` 进 CI,绿
+- [x] `cross-restore.sh` 在独立 Lima+QEMU gate 中连续三次通过
 - [ ] `ci/zdtm-allowlist.txt` 至少 3 个测试
 - [ ] 跑过一次全量 ZDTM,产出「失败原因统计表」,写进本文件的附录
 - [ ] 用统计表确定 A4/A5/A6/A7 的实施顺序,更新 `03-Iteration-Plan.md`
@@ -678,10 +682,33 @@ guest 中通过真实 `criu restore` 之前，不得把 A3 或 A 轨门禁标记
 
 ### Task 10 验证记录(2026-09-13)
 
-宿主机验证已完成:转换器构建、格式/镜像契约、task/VMA/page/error 合约以及 shell
-语法检查均通过。`criu-field-compare.sh` 和 `cross-restore.sh` 在宿主机以非 root
-运行时按约定返回 `77` 跳过；本机没有可启动的 Linux 5.10.29 QEMU 资产，因此尚未
-获得 `A3_CROSS_RESTORE: PASS`。这属于环境限制，不作为 A3 完成证据。
+Lima+QEMU 环境约定：macOS 只负责编辑、Git 和通过 `limactl shell` 编排；Lima `criu-dev` 负责构建，并在其中执行 `scripts/run-qemu.sh`；嵌套的 Linux 5.10.29 QEMU guest 是唯一允许 `insmod`、`rmmod` 和运行内核测试的环境。不要在 macOS 或 Lima 的 5.15 内核中直接加载模块。
+
+宿主侧静态验证已完成：转换器构建、格式/镜像契约、task/VMA/page/error 合约以及 shell
+语法检查均通过。`criu-field-compare.sh` 和 `cross-restore.sh` 若在 macOS 或 Lima 直接运行，会因非目标 guest/root 条件按约定返回 `77` 跳过；正确入口是：
+
+```bash
+limactl shell criu-dev bash -lc 'cd /Users/yhome/workspace/source_code/criu_module && ./scripts/run-qemu.sh --ci --script tests/cross-restore.sh'
+```
+
+已在 Lima `criu-dev` 中启动真实 Linux 5.10.29 QEMU guest 并执行该入口。2026-09-13
+的第二次路径方案将 snapshot、镜像、目标标准输入/输出和 restore 日志固定在 guest
+本地 `/tmp/a3-cross-restore.*`，并让 restore 在 guest `/` 下执行，避免 dump 与 restore
+把相对路径 `.` 解析到不同的 9p 目录。没有使用
+`--skip-file-rwx-check`。另外，`build-kernel.sh` 现在强制 initramfs 根目录为 `0755`；
+此前 Lima 的 group-writable umask 使 guest `/` 被打包为 `0775`，即使 restore 在 `/`
+下执行仍会触发 `File . has bad mode 040775 (expect 040755)`。
+
+该权限错误已不再出现。验证还发现并修复了 converter 对 `vm_pgoff` 的单位转换：内核
+快照以页保存，而 CRIU 的 `vma_entry.pgoff` 使用字节偏移；未转换时，ELF 的
+`0x48f000` 映射在 restorer 中返回 `EINVAL`。随后又补齐了 AArch64
+`thread.uw.tp_value` 到 `ti_aarch64.tls` 的传递；此前 restored PID 会立即退出，
+根因是 glibc TLS 指针为零。修复后连续三次真实 guest restore 均保持进程存活并输出
+`A3_CROSS_RESTORE: PASS`。
+
+ZDTM 接入已实现 `userspace/criu-shim`、顶层 userspace Makefile 和 A-track 模块生命
+周期，但暂未加入 allowlist。当前 `env00` 探测受测试 guest 的时钟命名空间/挂载条件
+以及 CRIU 动态加载器路径限制，不能作为 A3 通过证据；因此 allowlist 继续保持空白。
 
 ## 7. 如果 restore 一直不通
 

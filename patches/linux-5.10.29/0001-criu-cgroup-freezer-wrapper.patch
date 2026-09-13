@@ -37,15 +37,16 @@
 +#endif /* _LINUX_CRIU_FREEZER_H */
 --- a/kernel/cgroup/cgroup.c
 +++ b/kernel/cgroup/cgroup.c
-@@ -31,6 +31,7 @@
+@@ -31,6 +31,8 @@
  #include "cgroup-internal.h"
++#include "../../fs/kernfs/kernfs-internal.h"
 
  #include <linux/cred.h>
 +#include <linux/criu_freezer.h>
  #include <linux/errno.h>
  #include <linux/init_task.h>
  #include <linux/kernel.h>
-@@ -5570,0 +5570,202 @@
+@@ -5570,0 +5570,229 @@
 +/*
 + * A narrow in-kernel cgroup-v2 freezer boundary for CRIU's out-of-tree
 + * module.  The module must not depend on cgroup-internal.h: cgroup creation,
@@ -56,20 +57,70 @@
 +	struct cgroup *temporary;
 +	struct task_struct *leader;
 +};
-+
 +static atomic64_t criu_freezer_seq = ATOMIC64_INIT(0);
 +
-+static void criu_freezer_destroy_temporary(struct cgroup *temporary)
++static int criu_freezer_destroy_temporary(struct cgroup *temporary)
 +{
 +	int ret;
 +
 +	if (!temporary)
-+		return;
++		return -EINVAL;
 +
-+	ret = cgroup_rmdir(temporary->kn);
++	mutex_lock(&cgroup_mutex);
++	ret = cgroup_destroy_locked(temporary);
++	mutex_unlock(&cgroup_mutex);
 +	if (ret)
 +		pr_warn("CRIU freezer: unable to remove temporary cgroup (%d)\n",
 +			ret);
++	return ret;
++}
++
++/* cgroup_mkdir() is a kernfs write callback and requires an active parent
++ * reference.  The exported wrapper is called from a module, so reproduce
++ * its create/activate sequence while holding cgroup_mutex. */
++static struct cgroup *criu_freezer_create_child(struct cgroup *parent,
++						const char *name, umode_t mode)
++{
++	struct cgroup *cgrp;
++	struct kernfs_node *active_parent;
++	int ret;
++
++	active_parent = kernfs_get_active(parent->kn);
++	if (!active_parent) {
++		pr_info("CRIU freezer: parent active reference failed\n");
++		return ERR_PTR(-ENODEV);
++	}
++	mutex_lock(&cgroup_mutex);
++	if (!cgroup_check_hierarchy_limits(parent)) {
++		mutex_unlock(&cgroup_mutex);
++		kernfs_put_active(active_parent);
++		return ERR_PTR(-EAGAIN);
++	}
++	cgrp = cgroup_create(parent, name, mode);
++	if (IS_ERR(cgrp)) {
++		pr_info("CRIU freezer: cgroup_create failed %ld\n", PTR_ERR(cgrp));
++		mutex_unlock(&cgroup_mutex);
++		kernfs_put_active(active_parent);
++		return cgrp;
++	}
++	kernfs_get(cgrp->kn);
++	ret = cgroup_kn_set_ugid(cgrp->kn);
++	if (ret)
++		pr_info("CRIU freezer: set_ugid failed %d\n", ret);
++	if (!ret)
++		ret = css_populate_dir(&cgrp->self);
++	if (!ret)
++		ret = cgroup_apply_control_enable(cgrp);
++	if (!ret) {
++		kernfs_activate(cgrp->kn);
++		mutex_unlock(&cgroup_mutex);
++		kernfs_put_active(active_parent);
++		return cgrp;
++	}
++	cgroup_destroy_locked(cgrp);
++	mutex_unlock(&cgroup_mutex);
++	kernfs_put_active(active_parent);
++	return ERR_PTR(ret);
 +}
 +int criu_cgroup_freeze_threadgroup(struct task_struct *leader,
 +				   struct criu_freezer_cookie **cookie,
@@ -78,7 +129,6 @@
 +{
 +	struct criu_freezer_cookie *ctx;
 +	struct cgroup *original = NULL, *temporary = NULL;
-+	struct kernfs_node *child_kn = NULL;
 +	char name[64];
 +	int ret, path_len;
 +	bool threadgroup_locked = false;
@@ -125,10 +175,13 @@
 +		goto out_put_original_unlocked;
 +	}
 +
-+	/* cgroup_mkdir performs the normal kernfs/css setup and activation. */
-+	ret = cgroup_mkdir(original->kn, name, 0755);
-+	if (ret)
++	temporary = criu_freezer_create_child(original, name, 0755);
++	ret = PTR_ERR_OR_ZERO(temporary);
++	if (ret) {
++		temporary = NULL;
 +		goto out_put_original_unlocked;
++	}
++	cgroup_get_live(temporary);
 +
 +	if (!strcmp(original_path, "/"))
 +		ret = scnprintf(temporary_path, temporary_len, "/%s", name);
@@ -137,31 +190,19 @@
 +				original_path, name);
 +	if (ret < 0 || ret >= temporary_len) {
 +		ret = -ENAMETOOLONG;
-+		goto out_remove_by_name;
++		goto out_destroy_temporary;
 +	}
 +
-+	/* Pin the new cgroup through the kernfs node before taking its css ref. */
-+	child_kn = kernfs_find_and_get(original->kn, name);
-+	if (!child_kn || kernfs_type(child_kn) != KERNFS_DIR) {
-+		ret = -ENOENT;
-+		goto out_remove_by_name;
-+	}
-+	temporary = child_kn->priv;
-+	mutex_lock(&cgroup_mutex);
-+	if (cgroup_is_dead(temporary)) {
-+		mutex_unlock(&cgroup_mutex);
-+		ret = -ENODEV;
-+		goto out_put_child_kn;
-+	}
-+	cgroup_get_live(temporary);
-+	mutex_unlock(&cgroup_mutex);
-+	kernfs_put(child_kn);
-+	child_kn = NULL;
 +
 +	mutex_lock(&cgroup_mutex);
++	pr_info("CRIU freezer: attaching pid=%d\n", task_pid_vnr(leader));
 +	ret = cgroup_attach_task(temporary, leader, true);
++	pr_info("CRIU freezer: attach returned %d\n", ret);
++	if (!ret)
++		pr_info("CRIU freezer: requesting freeze\n");
 +	if (!ret)
 +		cgroup_freeze(temporary, true);
++	pr_info("CRIU freezer: freeze request returned\n");
 +	mutex_unlock(&cgroup_mutex);
 +	if (ret)
 +		goto out_destroy_temporary;
@@ -173,22 +214,6 @@
 +	*cookie = ctx;
 +	cgroup_threadgroup_change_end(leader);
 +	return 0;
-+
-+out_put_child_kn:
-+	if (child_kn)
-+		kernfs_put(child_kn);
-+out_remove_by_name:
-+	/* The cgroup is empty because migration has not started. */
-+	child_kn = kernfs_find_and_get(original->kn, name);
-+	if (child_kn) {
-+		cgroup_rmdir(child_kn);
-+		kernfs_put(child_kn);
-+	}
-+	cgroup_put(original);
-+	if (threadgroup_locked)
-+		cgroup_threadgroup_change_end(leader);
-+	kfree(ctx);
-+	return ret;
 +
 +out_destroy_temporary:
 +	criu_freezer_destroy_temporary(temporary);
@@ -223,6 +248,7 @@
 +	original = ctx->original;
 +	temporary = ctx->temporary;
 +	leader = ctx->leader;
++	pr_info("CRIU freezer: thaw begin pid=%d\n", task_pid_vnr(leader));
 +	cgroup_threadgroup_change_begin(leader);
 +	mutex_lock(&cgroup_mutex);
 +	cgroup_freeze(temporary, false);
@@ -231,11 +257,13 @@
 +		cgroup_freeze(temporary, true);
 +	mutex_unlock(&cgroup_mutex);
 +	cgroup_threadgroup_change_end(leader);
++	pr_info("CRIU freezer: thaw attach ret=%d\n", ret);
 +	if (ret)
 +		/* Keep the cookie live so the caller can retry thaw. */
 +		return ret;
 +
-+	ret = cgroup_rmdir(temporary->kn);
++	ret = criu_freezer_destroy_temporary(temporary);
++	pr_info("CRIU freezer: thaw destroy ret=%d\n", ret);
 +	if (ret)
 +		/* Membership is restored; keep refs for a retry of cgroup_rmdir. */
 +		return ret;

@@ -458,6 +458,23 @@ static uint64_t reg_u64(const struct blob_ref *regs, size_t offset)
 	return u64(regs->data + sizeof(uint32_t) + offset);
 }
 
+static int aarch64_tls(const struct blob_ref *regs, uint64_t *tls)
+{
+	size_t regs_size;
+	size_t offset;
+
+	if (!regs->data || regs->len < sizeof(uint32_t))
+		return -1;
+	regs_size = u32(regs->data);
+	if (regs_size > regs->len - sizeof(uint32_t))
+		return -1;
+	offset = sizeof(uint32_t) + regs_size;
+	if (regs->len != offset + sizeof(uint64_t))
+		return -1;
+	*tls = u64(regs->data + offset);
+	return 0;
+}
+
 static int add_nested(struct image_writer *outer, unsigned field,
 			  const struct image_writer *inner)
 {
@@ -555,9 +572,12 @@ static int build_task_core(const struct snapshot_model *model,
 	struct image_writer rlimits;
 	uint64_t blocked = task_field_u64(&model->task, 48);
 	int ret;
+	unsigned sig;
+	struct image_writer sa;
 
 	image_writer_init(&timers);
 	image_writer_init(&rlimits);
+	image_writer_init(&sa);
 	ret = image_writer_field_varint(message, 1, 1) ||
 		image_writer_field_varint(message, 2, 0) ||
 		image_writer_field_varint(message, 3, 0) ||
@@ -575,8 +595,20 @@ static int build_task_core(const struct snapshot_model *model,
 		ret = add_nested(message, 8, &rlimits);
 	if (!ret)
 		ret = image_writer_field_bytes(message, 10, NULL, 0);
+	/* A core image with no repeated sigactions makes CRIU fall back to the
+	 * legacy sigacts-$pid.img stream. A3 does not emit that stream, so encode
+	 * the complete default disposition table directly in task_core. */
+	for (sig = 0; !ret && sig < 62; sig++) {
+		sa.len = 0;
+		ret = image_writer_field_varint(&sa, 1, 0) ||
+			image_writer_field_varint(&sa, 2, 0) ||
+			image_writer_field_varint(&sa, 3, 0) ||
+			image_writer_field_varint(&sa, 4, 0) ||
+			add_nested(message, 15, &sa);
+	}
 	if (!ret)
 		ret = image_writer_field_sint64(message, 14, 0);
+	image_writer_free(&sa);
 	image_writer_free(&timers);
 	image_writer_free(&rlimits);
 	return ret;
@@ -615,8 +647,10 @@ static int build_thread_core(const struct snapshot_model *model,
 		ret = add_nested(message, 10, &creds);
 	if (!ret)
 		ret = image_writer_field_bytes(message, 13, comm, strlen(comm));
+	/* No cgroup image is emitted in A3.  A zero cg_set tells CRIU to inherit
+	 * the restore caller's cgroup instead of looking for set 1 in cgroup.img. */
 	if (!ret)
-		ret = image_writer_field_varint(message, 16, 1);
+		ret = image_writer_field_varint(message, 16, 0);
 	if (!ret)
 		ret = image_writer_field_varint(message, 17, 50000);
 	image_writer_free(&sas);
@@ -653,12 +687,15 @@ static int build_aarch64_thread_info(const struct blob_ref *regs,
 {
 	struct image_writer gpregs;
 	struct image_writer fpsimd;
+	uint64_t tls;
 	int ret;
 
+	if (aarch64_tls(regs, &tls))
+		return -1;
 	image_writer_init(&gpregs);
 	image_writer_init(&fpsimd);
 	ret = image_writer_field_varint(message, 1, 0) ||
-		image_writer_field_varint(message, 2, 0);
+		image_writer_field_varint(message, 2, tls);
 	if (!ret)
 		ret = build_aarch64_gpregs(regs, &gpregs);
 	if (!ret)
@@ -815,9 +852,14 @@ static int build_vma(const struct snapshot_model *model, size_t index,
 	const uint8_t *vma = model->vmas.items[index].data;
 	uint32_t class = u32(vma + 28);
 	uint32_t shmid = 0;
+	uint64_t pgoff = u64(vma + 16);
+	uint64_t pgoff_bytes = 0;
 
 	if (class == VMA_CLASS_FILE_PRIVATE) {
 		size_t i;
+		if (!model->page_size || pgoff > UINT64_MAX / model->page_size)
+			return -1;
+		pgoff_bytes = pgoff * model->page_size;
 		for (i = 0; i < files->count; i++) {
 			if (files->items[i].dev == u64(vma + VMA_DEV_OFFSET) &&
 				files->items[i].ino == u64(vma + VMA_INO_OFFSET) &&
@@ -837,9 +879,10 @@ static int build_vma(const struct snapshot_model *model, size_t index,
 		if (!shmid)
 			return -1;
 	}
+	/* Kernel snapshots store vm_pgoff in pages; CRIU images use byte offsets. */
 	return image_writer_field_varint(message, 1, u64(vma)) ||
 		image_writer_field_varint(message, 2, u64(vma + 8)) ||
-		image_writer_field_varint(message, 3, u64(vma + 16)) ||
+		image_writer_field_varint(message, 3, pgoff_bytes) ||
 		image_writer_field_varint(message, 4, shmid) ||
 		image_writer_field_varint(message, 5, u32(vma + 24)) ||
 		image_writer_field_varint(message, 6, vma_flags(vma)) ||
@@ -1112,8 +1155,15 @@ static int build_inventory(struct image_writer *message)
 	image_writer_init(&ids);
 	ret = image_writer_field_varint(message, 1, 2) ||
 		image_writer_field_varint(message, 2, 1);
+	/* inventory carries root_ids, which CRIU compares with the task's
+	 * task_kobj_ids.  Keep files_id distinct for a single root task so the
+	 * restore-side CLONE_FILES consistency check does not treat it as a
+	 * shared-fd child of itself. */
 	if (!ret)
-		ret = build_ids(&ids);
+		ret = image_writer_field_varint(&ids, 1, 1) ||
+			image_writer_field_varint(&ids, 2, 2) ||
+			image_writer_field_varint(&ids, 3, 1) ||
+			image_writer_field_varint(&ids, 4, 1);
 	if (!ret)
 		ret = add_nested(message, 3, &ids);
 	if (!ret)

@@ -80,6 +80,7 @@ fi
 disable CONFIG_ARM64_PTR_AUTH # CRIU 4.2.1 cannot query PAC on 5.10.29
 enable CONFIG_DEBUG_FS		# A1's probe interface
 enable CONFIG_CHECKPOINT_RESTORE # /proc/*/map_files, kcmp(), etc.
+enable CONFIG_BINFMT_MISC         # ZDTM's binfmt_misc mount preflight
 enable CONFIG_MEM_SOFT_DIRTY	# incremental dump
 enable CONFIG_PROC_FS
 enable CONFIG_PROC_PAGE_MONITOR	# /proc/*/pagemap
@@ -102,6 +103,13 @@ enable CONFIG_POSIX_MQUEUE
 enable CONFIG_NAMESPACES
 enable CONFIG_PID_NS
 enable CONFIG_NET_NS
+enable CONFIG_VETH		# CRIU kerndat creates a veth pair during startup
+enable CONFIG_NETFILTER
+enable CONFIG_NF_TABLES
+enable CONFIG_NF_TABLES_INET
+# Linux 5.10 implements concatenated sets in NF_TABLES itself; there is no
+# CONFIG_NFT_CONCAT symbol.  CRIU's probe only creates an inet concatenated
+# set, so NF_TABLES_INET is the required family support.
 enable CONFIG_UTS_NS
 enable CONFIG_IPC_NS
 enable CONFIG_USER_NS
@@ -141,19 +149,42 @@ make ARCH=arm64 -j"$JOBS" Image modules
 echo ">>> Building initramfs (fallback for run-qemu.sh when virtme-ng is absent)"
 IRD="$KROOT/initramfs-$VERSION"
 rm -rf "$IRD"
-mkdir -p "$IRD"/{bin,sbin,proc,sys,dev,tmp,mnt,root}
+mkdir -p "$IRD"/{bin,sbin,proc,sys,dev,dev/pts,proc/sys/fs/binfmt_misc,tmp,mnt,root}
+# The Lima guest commonly uses a group-writable umask.  CRIU records the
+# target's root directory mode and restore validates it, so keep the initramfs
+# root at the conventional 0755 regardless of the build user's umask.
+chmod 755 "$IRD"
 cp "$(command -v busybox)" "$IRD/bin/busybox"
-( cd "$IRD/bin" && for a in sh ls cat mount umount mountpoint insmod rmmod dmesg \
-	sleep kill ps grep mkdir echo cp mv rm chmod dd id tail uname poweroff; do ln -sf busybox "$a"; done )
+
+( cd "$IRD/bin" && for a in sh ls cat mount umount mountpoint insmod rmmod dmesg ip setsid \
+	sleep kill ps grep mkdir echo true false cp mv rm chmod dd id tail uname poweroff; do ln -sf busybox "$a"; done )
+# ZDTM invokes rm from a restricted /bin-first PATH and needs GNU's
+# --one-file-system option during its cleanout targets.  The binary is copied
+# after the BusyBox symlink is removed so the archive contains GNU rm itself.
+rm -f "$IRD/bin/rm"
+cp /usr/bin/rm "$IRD/bin/rm"
 cat > "$IRD/init" <<'INIT'
 #!/bin/sh
 mount -t proc  proc  /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs dev /dev 2>/dev/null
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null
 mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
 mkdir -p /mnt/host
 # 9p passthrough of the project directory, mounted by run-qemu.sh's -virtfs
 mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/host 2>/dev/null
+# Read-only Lima runtime mounts used by A3's real CRIU/crit gate.  The
+# fallback initramfs remains small while dynamically linked ARM64 tools are
+# resolved from the Lima build guest.  Missing mounts are tolerated so the
+# earlier kernel/module gates keep working in reduced environments.
+mkdir -p /usr /lib
+mount -t 9p -o trans=virtio,version=9p2000.L limausr /usr 2>/dev/null
+mount -t 9p -o trans=virtio,version=9p2000.L limalib /lib 2>/dev/null
+# CRIU's TCP_REPAIR capability probe binds 127.0.0.1.  The minimal guest has
+# no distro init system, so bring up loopback explicitly before test scripts.
+/bin/ip link set lo up 2>/dev/null || true
 echo "=== guest up: $(uname -r) ==="
 if [ -x /mnt/host/guest-script.sh ]; then
 	echo "=== running guest script ==="

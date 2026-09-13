@@ -32,6 +32,10 @@ struct criu_task_record {
 struct criu_regs_record {
 	__u32 size;
 	__u8 data[CRIU_TASK_REG_BYTES];
+#ifdef CONFIG_ARM64
+	/* TPIDR_EL0 is not part of struct pt_regs, but is required by glibc. */
+	__u64 tls;
+#endif
 } __attribute__((packed));
 
 struct criu_creds_record {

@@ -25,3 +25,17 @@ guest-script.sh
 artifacts/s0/
 tests/s0/.s0-*
 tests/s0/*.tmp
+
+# A3 runtime evidence and userspace build products.
+artifacts/a3/
+artifacts/a3-*
+dump.log
+.fuse_hidden*
+userspace/criu-module-convert/*.o
+userspace/criu-module-convert/criu-module-convert
+userspace/criu-shim/criu-shim
+userspace/criu-shim/*.dSYM/
+tests/progs/busy-counter
+tests/progs/minimal
+tests/progs/multithread-counter
+tests/progs/stopped-counter

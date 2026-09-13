@@ -15,7 +15,10 @@ grep -q 'CRIU_SNAPSHOT_REC_CREDS' "$task_h"
 grep -q 'CRIU_SNAPSHOT_UNSUPPORTED' "$task_c"
 grep -q 'signal_pending' "$task_c"
 grep -q 'rlim' "$task_c"
+grep -q 'thread.uw.tp_value' "$task_c"
 grep -q 'task_pt_regs' "$task_c"
+grep -q 'rcu_read_lock' "$task_c"
+grep -q 'rcu_read_unlock' "$task_c"
 grep -q 'CRIU_SNAPSHOT_REC_FD' "$files_h"
 grep -q 'CRIU_SNAPSHOT_REC_FS' "$files_h"
 grep -q 'S_ISREG' "$files_c"
@@ -23,6 +26,9 @@ grep -q 'fd 0' "$files_c"
 grep -q 'CRIU_SNAPSHOT_UNSUPPORTED' "$files_c"
 grep -q 'checkpoint/dump_task.o' "$makefile"
 grep -q 'checkpoint/dump_files.o' "$makefile"
+# Linux 5.10.29 does not export the files_struct reference helpers to modules.
+! grep -qE '\b(get_files_struct|put_files_struct)\s*\(' "$files_c"
+grep -q 'task->files' "$files_c"
 
 # Keep the A3 boundary explicit: no signal handlers, pending signals, timers,
 # sockets, or descriptors beyond stdin/stdout/stderr.

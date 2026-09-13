@@ -35,7 +35,7 @@ for i in range(31):
 struct.pack_into('<Q', regs, 248, 0x700000)
 struct.pack_into('<Q', regs, 256, 0x400120)
 struct.pack_into('<Q', regs, 264, 0x60001000)
-add(4, struct.pack('<I', len(regs)) + regs)
+add(4, struct.pack('<I', len(regs)) + regs + struct.pack('<Q', 0x12345000))
 
 creds = struct.pack('<9I', 1000, 1000, 1000, 1000, 1000, 1000,
                     1000, 1000, 0)
@@ -49,19 +49,19 @@ mm_values = [0x400000, 0x401000, 0x400000, 0x401000,
 add(2, struct.pack('<2I12Q2I', 1234, 1234, *mm_values, 3, 0))
 
 def vma(start, end, prot, cls, special, policy, flags, dev, ino, path,
-        present=0, saved=0, zero=0, file=0):
-    return struct.pack('<3Q5I6Q512s', start, end, 0, prot, cls, special,
+        pgoff=0, present=0, saved=0, zero=0, file=0):
+    return struct.pack('<3Q5I6Q512s', start, end, pgoff, prot, cls, special,
                        policy, flags, dev, ino, present, saved, zero, file,
                        fixed_path(path))
 
 # CRIU classes: anon-private=0, file-private=3.  The first file VMA is the
 # executable and is used to populate mm.exe_file_id.
 add(3, vma(0x400000, 0x401000, 5, 3, 0, 2, 0, 1, 10,
-           '/tmp/a3-exe', present=1))
+           '/tmp/a3-exe', pgoff=5, present=1))
 add(3, vma(0x500000, 0x501000, 3, 0, 0, 1, 0, 0, 0,
            '[heap]', present=1, saved=1))
 add(3, vma(0x7fffffe000, 0x7ffffff000, 3, 0, 0, 1, 2, 0, 0,
-           '[stack]', present=1))
+           '[stack]', pgoff=(1 << 64) - 16, present=1))
 
 def fd(fdno, mode, path):
     return struct.pack('<2I5Q512s', fdno, mode, 0, 0, dev := 1,
@@ -158,12 +158,18 @@ core = fields(messages('core-1234.img', 8)[0])
 assert {1, 3, 4, 5, 8}.issubset(core), core.keys()
 assert {1, 2, 3, 4, 5, 6}.issubset(fields(core[3][0]))
 assert {1, 2, 3, 4}.issubset(fields(core[8][0])), fields(core[8][0]).keys()
+assert fields(core[8][0])[2][0] == 0x12345000
 
 mm = fields(messages('mm-1234.img', 8)[0])
 assert 12 in mm and len(mm[14]) == 3, mm.keys()
 vmas = [fields(item) for item in mm[14]]
 assert vmas[0][4][0] == 1 and vmas[0][6][0] == 2
 assert vmas[1][4][0] == 0 and vmas[1][6][0] == 34
+# Snapshot vm_pgoff is page-based only for file mappings.  Anonymous stack
+# VMAs may carry internal grow-down values that must not reach CRIU mmap().
+assert vmas[0][3][0] == 5 * 4096
+assert vmas[1][3][0] == 0
+assert vmas[2][3][0] == 0
 
 files = messages('files.img', 8)
 assert len(files) >= 6, len(files)

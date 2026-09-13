@@ -19,6 +19,7 @@ grep -q 'criu_snapshot_writer_finish' "$dump_c"
 grep -q 'criu_thaw' "$dump_c"
 grep -q 'debugfs_create_file("dump"' "$main_c"
 grep -q 'checkpoint/dump.o' "$makefile"
+grep -q 'mkdir -p "\$DEBUG_ROOT"' "$root_dir/tests/cross-restore.sh"
 
 # Every post-freeze failure path must converge on the thaw label.
 awk '/ret = criu_freeze\(/ { seen=1 } seen && /goto thaw;/ { thaw=1 } END { exit !(seen && thaw) }' "$dump_c"

@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <signal.h>
 #include <unistd.h>
 
 #define HEAP_SIZE 8192U
@@ -47,12 +48,27 @@ static int check_bytes(const volatile unsigned char *buf, size_t len,
 	return 0;
 }
 
+static void reset_signal_dispositions(void)
+{
+	struct sigaction action;
+	int signo;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_handler = SIG_DFL;
+	sigemptyset(&action.sa_mask);
+	for (signo = 1; signo < NSIG; signo++)
+		if (signo != SIGKILL && signo != SIGSTOP)
+			sigaction(signo, &action, NULL);
+}
+
 int main(void)
 {
 	volatile unsigned char stack_marker[STACK_SIZE];
 	volatile unsigned char *heap_marker;
 	unsigned char command;
 	unsigned long tick = 0;
+
+	reset_signal_dispositions();
 
 	if (check_regular_fds() < 0) {
 		fprintf(stderr, "minimal: fd 0/1/2 must be regular files: %s\n",

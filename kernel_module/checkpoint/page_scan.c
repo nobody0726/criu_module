@@ -42,12 +42,12 @@ static bool page_is_zero(struct page *page)
 	return page && is_zero_pfn(page_to_pfn(page));
 }
 
-static bool page_is_file_backed(const struct vm_area_struct *vma,
+static bool page_is_file_backed(const struct criu_vma_info *vma,
 					struct page *page)
 {
 	/* A private file page which is still file-backed must come from the file. */
-	return vma->vm_file && !(vma->vm_flags & VM_SHARED) &&
-			page && !PageAnon(page);
+	return vma->class == CRIU_VMA_FILE_PRIVATE &&
+		page && !PageAnon(page);
 }
 
 static int emit_page(struct criu_snapshot_writer *writer,
@@ -77,24 +77,24 @@ static int emit_page(struct criu_snapshot_writer *writer,
 	return ret;
 }
 
-static int scan_vma(struct mm_struct *mm, struct vm_area_struct *vma,
-			    struct criu_snapshot_writer *writer)
+static int scan_vma(struct mm_struct *mm, const struct criu_vma_info *vma,
+				    struct criu_snapshot_writer *writer)
 {
 	unsigned long addr;
-	bool vdso = false;
+	bool vdso;
 
-	if (vma->vm_ops && vma->vm_ops->name) {
-		const char *name = vma->vm_ops->name(vma);
-		vdso = name && !strcmp(name, "[vdso]");
-	}
-	/* vvar and guard/PROT_NONE mappings have no readable payload. */
-	if ((vma->vm_ops && vma->vm_ops->name &&
-		 !strcmp(vma->vm_ops->name(vma), "[vvar]")) ||
-	    !(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)) ||
-	    (vma->vm_flags & VM_DONTDUMP))
+	/*
+	 * vvar and guard/PROT_NONE mappings have no readable payload.  The
+	 * normalized dontdump bit originates from VM_DONTDUMP in vma_walk.c.
+	 * The special names are [vvar] and [vdso].
+	 */
+	if (vma->special == CRIU_VMA_SPECIAL_VVAR ||
+	    vma->special == CRIU_VMA_SPECIAL_PROT_NONE ||
+	    !vma->prot || vma->dontdump)
 		return 0;
+	vdso = vma->special == CRIU_VMA_SPECIAL_VDSO;
 
-	for (addr = vma->vm_start; addr < vma->vm_end; addr += PAGE_SIZE) {
+	for (addr = vma->start; addr < vma->end; addr += PAGE_SIZE) {
 		struct page *page = NULL;
 		int state = get_resident_page(mm, addr, &page);
 		int ret;
@@ -122,8 +122,9 @@ static int scan_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 int criu_dump_pages(struct task_struct *task,
 			struct criu_snapshot_writer *writer)
 {
+	struct criu_snapshot snapshot;
 	struct mm_struct *mm;
-	struct vm_area_struct *vma;
+	unsigned long i;
 	int ret = 0;
 
 	if (!task || !writer)
@@ -131,13 +132,16 @@ int criu_dump_pages(struct task_struct *task,
 	mm = get_task_mm(task);
 	if (!mm)
 		return -ESRCH;
-	mmap_read_lock(mm);
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		ret = scan_vma(mm, vma, writer);
+	ret = criu_snapshot_capture(task, &snapshot, false);
+	if (ret)
+		goto out_mm;
+	for (i = 0; i < snapshot.mm.vma_count; i++) {
+		ret = scan_vma(mm, &snapshot.vmas[i], writer);
 		if (ret)
 			break;
 	}
-	mmap_read_unlock(mm);
+	criu_snapshot_destroy(&snapshot);
+out_mm:
 	mmput(mm);
 	return ret;
 }

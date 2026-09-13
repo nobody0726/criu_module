@@ -94,7 +94,7 @@ mini-restore 落点。S0 的完整实测记录和配置 hash 见
 |---|---|---|---|---|
 | **A1** | 只读探针 + 对照 diff | 1-2 周 | 能读出 VMA 列表,与 `/proc` 逐字段一致 | [A1 步骤](steps/A1-readonly-probe.md)、[设计](plans/2026-09-06-a1-readonly-probe-design.md)、[计划](plans/2026-09-06-a1-readonly-probe.md) |
 | **A2** | 冻结 / 解冻 | 1 周 | 可靠冻结多线程进程,无信号丢失 | [A2](steps/A2-freeze.md)、[设计](plans/2026-09-06-a2-freeze-design.md)、[计划](plans/2026-09-06-a2-freeze-implementation.md) |
-| **A3** | **极简进程完整 dump(里程碑，进行中)** | 2-3 周 | `criu restore` 能恢复本模块产出的镜像 | [A3](steps/A3-minimal-dump.md)、[设计](plans/2026-09-11-a3-minimal-dump-design.md)、[计划](plans/2026-09-11-a3-minimal-dump-implementation.md) |
+| **A3** | **极简进程完整 dump(核心 gate 已通过，收尾中)** | 2-3 周 | `criu restore` 能恢复本模块产出的镜像 | [A3](steps/A3-minimal-dump.md)、[设计](plans/2026-09-11-a3-minimal-dump-design.md)、[计划](plans/2026-09-11-a3-minimal-dump-implementation.md) |
 | **A4** | 多线程 | 1-2 周 | 每线程 `core-$tid.img` | [A4](steps/A4-threads.md) |
 | **A5** | 文件描述符(pipe → 常规文件 → unix socket) | 2-3 周 | `files.img` / `fdinfo-*.img` | [A5](steps/A5-fds.md) |
 | **A6** | 信号与定时器 | 1-2 周 | `sigacts-*.img` / `timer*.img` | [A6](steps/A6-signals-timers.md) |

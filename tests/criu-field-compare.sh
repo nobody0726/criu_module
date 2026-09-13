@@ -30,8 +30,7 @@ fail()
 		fail "cannot build $CONVERTER"
 }
 [ -x "$ROOT/tests/progs/minimal" ] ||
-	make -C "$ROOT/tests/progs" minimal >/dev/null 2>&1 ||
-	fail "cannot build minimal test program"
+	fail "minimal test program is not prebuilt; build it in the Lima orchestration guest before booting QEMU"
 
 if [ -z "$CRIU" ]; then
 	CRIU=$(command -v criu 2>/dev/null || true)
@@ -42,23 +41,30 @@ fi
 
 crit_decode()
 {
-	image=$1
-	output=$2
+	source_image=$1
+	output_path=$2
 	if [ -n "$CRIT" ]; then
-		"$CRIT" decode -i "$image" --pretty >"$output"
+		"$CRIT" decode -i "$source_image" --pretty >"$output_path"
 	elif command -v crit >/dev/null 2>&1; then
-		crit decode -i "$image" --pretty >"$output"
+		crit decode -i "$source_image" --pretty >"$output_path"
 	elif [ -f "$ROOT/criu/crit/crit/__main__.py" ]; then
 		PYTHONPATH="$ROOT/criu/lib:$ROOT/criu/crit" \
-			python3 -m crit decode -i "$image" --pretty >"$output"
+			python3 -m crit decode -i "$source_image" --pretty >"$output_path"
 	else
 		return 127
 	fi
 }
 
-if ! mountpoint -q "$DEBUG_ROOT" 2>/dev/null; then
+mkdir -p "$DEBUG_ROOT"
+if ! grep -q " $DEBUG_ROOT " /proc/mounts; then
 	mount -t debugfs none "$DEBUG_ROOT" 2>/dev/null ||
 		skip "cannot mount debugfs at $DEBUG_ROOT"
+fi
+CGROUP_ROOT=/sys/fs/cgroup
+mkdir -p "$CGROUP_ROOT"
+if ! grep -q " $CGROUP_ROOT cgroup2 " /proc/mounts; then
+	mount -t cgroup2 none "$CGROUP_ROOT" 2>/dev/null ||
+		skip "cannot mount cgroup2 at $CGROUP_ROOT"
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/a3-field-compare.XXXXXX")
@@ -84,8 +90,13 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
-# Launch from / with all standard descriptors backed by regular files.
-(cd / && exec "$ROOT/tests/progs/minimal" <"$INPUT" >"$TARGET_OUT" 2>"$TARGET_ERR") &
+# Keep the session leader inside the single-task dump set.
+# Linux 5.10.29 provides rseq(2), but predates PTRACE_GET_RSEQ_CONFIGURATION.
+# Modern glibc registers rseq automatically; native CRIU correctly refuses to
+# dump that state without the ptrace interface.  A3's single-threaded target
+# deliberately stays within the kernel's supported CRIU feature subset.
+(cd / && exec env GLIBC_TUNABLES=glibc.pthread.rseq=0 \
+	setsid "$ROOT/tests/progs/minimal" <"$INPUT" >"$TARGET_OUT" 2>"$TARGET_ERR") &
 PID=$!
 for _ in $(seq 1 100); do
 	if grep -q '^pid=' "$TARGET_OUT" 2>/dev/null; then
@@ -114,38 +125,38 @@ MODULE_LOADED=0
 
 IMAGES="inventory.img pstree.img core-$PID.img mm-$PID.img pagemap-$PID.img files.img fdinfo-1.img fs-$PID.img creds-$PID.img reg-files.img"
 DIFF=0
-for image in $IMAGES; do
-	ref_image=$REF/$image
-	our_image=$OURS/$image
+for image_name in $IMAGES; do
+	ref_image=$REF/$image_name
+	our_image=$OURS/$image_name
 	if [ ! -f "$ref_image" ]; then
 		# reg-files.img is a legacy compatibility image and is absent from
 		# current CRIU dumps, which place reg_file_entry inside files.img.
-		[ "$image" = reg-files.img ] && continue
-		echo "A3_FIELD_COMPARE: reference image missing: $image" >&2
+		[ "$image_name" = reg-files.img ] && continue
+		echo "A3_FIELD_COMPARE: reference image missing: $image_name" >&2
 		DIFF=1
 		continue
 	fi
 	if [ ! -f "$our_image" ]; then
-		echo "A3_FIELD_COMPARE: module image missing: $image" >&2
+		echo "A3_FIELD_COMPARE: module image missing: $image_name" >&2
 		DIFF=1
 		continue
 	fi
-	ref_json=$TMP/ref-$image.json
-	our_json=$TMP/ours-$image.json
+	ref_json=$TMP/ref-$image_name.json
+	our_json=$TMP/ours-$image_name.json
 	if ! crit_decode "$ref_image" "$ref_json"; then
-		echo "A3_FIELD_COMPARE: crit cannot decode reference $image" >&2
+		echo "A3_FIELD_COMPARE: crit cannot decode reference $image_name" >&2
 		DIFF=1
 		continue
 	fi
 	if ! crit_decode "$our_image" "$our_json"; then
-		echo "A3_FIELD_COMPARE: crit cannot decode module $image" >&2
+		echo "A3_FIELD_COMPARE: crit cannot decode module $image_name" >&2
 		DIFF=1
 		continue
 	fi
 	for side in ref ours; do
 		json=$ref_json
 		[ "$side" = ours ] && json=$our_json
-		out=$TMP/$side-$image.norm
+		out=$TMP/$side-$image_name.norm
 		python3 - "$json" "$out" <<'PY'
 import json
 import sys
@@ -168,9 +179,9 @@ with open(sys.argv[2], "w", encoding="utf-8") as dest:
     dest.write("\n")
 PY
 	done
-	if ! diff -u "$TMP/ref-$image.norm" "$TMP/ours-$image.norm" >"$TMP/$image.diff"; then
-		echo "A3_FIELD_COMPARE: unexpected differences in $image" >&2
-		sed -n '1,160p' "$TMP/$image.diff" >&2
+	if ! diff -u "$TMP/ref-$image_name.norm" "$TMP/ours-$image_name.norm" >"$TMP/$image_name.diff"; then
+		echo "A3_FIELD_COMPARE: unexpected differences in $image_name" >&2
+		sed -n '1,160p' "$TMP/$image_name.diff" >&2
 		DIFF=1
 	fi
 done

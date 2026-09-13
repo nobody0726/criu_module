@@ -2,6 +2,8 @@
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
+#include <linux/printk.h>
+#include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/signal.h>
 #include <linux/string.h>
@@ -40,19 +42,33 @@ int criu_dump_task(struct task_struct *task,
 
 	if (!task || !writer)
 		return -EINVAL;
-	if (task->signal && task->signal->nr_threads != 1)
+	if (task->signal && task->signal->nr_threads != 1) {
+		pr_info("criu_dump_task: reject threads=%d pid=%d\n",
+			task->signal->nr_threads, task_pid_vnr(task));
 		return -EOPNOTSUPP;
-	if (task->sighand && (has_signal_handlers(task->sighand) ||
-				     has_timers(task->signal)))
+	}
+	if (task->sighand && has_signal_handlers(task->sighand)) {
+		pr_info("criu_dump_task: reject signal handlers pid=%d\n",
+			task_pid_vnr(task));
 		return -EOPNOTSUPP;
-	if (signal_pending(task) || (task->pending.signal.sig[0]))
+	}
+	if (task->sighand && has_timers(task->signal)) {
+		pr_info("criu_dump_task: reject timers pid=%d\n", task_pid_vnr(task));
 		return -EOPNOTSUPP;
+	}
+	if (signal_pending(task) || (task->pending.signal.sig[0])) {
+		pr_info("criu_dump_task: reject pending signal pid=%d pending=%lx\n",
+			task_pid_vnr(task), task->pending.signal.sig[0]);
+		return -EOPNOTSUPP;
+	}
 
 	memset(&rec, 0, sizeof(rec));
 	rec.pid = task_pid_nr(task);
 	rec.tgid = task_tgid_nr(task);
+	rcu_read_lock();
 	parent = rcu_dereference(task->real_parent);
 	rec.ppid = parent ? task_pid_nr(parent) : 0;
+	rcu_read_unlock();
 	rec.task_flags = READ_ONCE(task->flags);
 	rec.state = READ_ONCE(task->state);
 	cred = get_task_cred(task);
@@ -91,11 +107,18 @@ int criu_dump_task(struct task_struct *task,
 		}
 	}
 	get_task_comm(rec.comm, task);
-	if (!task_pt_regs(task))
+	if (!task_pt_regs(task)) {
+		pr_info("criu_dump_task: reject missing regs pid=%d\n",
+			task_pid_vnr(task));
 		return -EOPNOTSUPP;
+	}
 	memset(&regs, 0, sizeof(regs));
 	regs.size = sizeof(struct pt_regs);
 	memcpy(regs.data, task_pt_regs(task), sizeof(struct pt_regs));
+#ifdef CONFIG_ARM64
+	/* The architecture preserves TPIDR_EL0 in thread.uw, outside pt_regs. */
+	regs.tls = task->thread.uw.tp_value;
+#endif
 	if (criu_snapshot_writer_record(writer, CRIU_SNAPSHOT_REC_TASK,
 					   0, &rec, sizeof(rec)))
 		return -EIO;

@@ -45,7 +45,17 @@ int criu_dump_files(struct task_struct *task,
 
 	if (!task || !writer)
 		return -EINVAL;
-	files = get_files_struct(task);
+	/*
+	 * The target is held by the freeze context and all its threads are
+	 * quiescent, so task->files cannot be replaced or freed during this
+	 * scan.  get_files_struct()/put_files_struct() are intentionally not
+	 * used: Linux 5.10.29 keeps those helpers internal to fs/file.c.
+	 */
+	task_lock(task);
+	files = task->files;
+	if (files)
+		atomic_inc(&files->count);
+	task_unlock(task);
 	if (!files)
 		return -ESRCH;
 	spin_lock(&files->file_lock);
@@ -108,6 +118,8 @@ int criu_dump_files(struct task_struct *task,
 		ret = criu_snapshot_writer_record(writer, CRIU_SNAPSHOT_REC_FS,
 						  0, &fs, sizeof(fs));
 out:
-	put_files_struct(files);
+	/* The frozen target still owns its files_struct, so this cannot reach zero. */
+	if (WARN_ON_ONCE(atomic_dec_and_test(&files->count)))
+		atomic_inc(&files->count);
 	return ret;
 }

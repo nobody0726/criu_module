@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/errno.h>
+#include <linux/printk.h>
 #include <linux/slab.h>
 
 #include "dump_mm.h"
@@ -30,10 +31,6 @@ static int classify_policy(const struct criu_vma_info *vma,
 	    vma->special == CRIU_VMA_SPECIAL_MIXEDMAP ||
 	    vma->special == CRIU_VMA_SPECIAL_UNKNOWN)
 		return -EOPNOTSUPP;
-	if (vma->class == CRIU_VMA_ANON_SHARED ||
-	    vma->class == CRIU_VMA_FILE_SHARED ||
-	    vma->class == CRIU_VMA_UNSUPPORTED)
-		return -EOPNOTSUPP;
 	if (vma->special == CRIU_VMA_SPECIAL_VDSO) {
 		*policy = CRIU_VMA_DUMP_VDSO;
 		return 0;
@@ -50,6 +47,10 @@ static int classify_policy(const struct criu_vma_info *vma,
 		*policy = CRIU_VMA_DUMP_SKIP_DONTDUMP;
 		return 0;
 	}
+	if (vma->class == CRIU_VMA_ANON_SHARED ||
+	    vma->class == CRIU_VMA_FILE_SHARED ||
+	    vma->class == CRIU_VMA_UNSUPPORTED)
+		return -EOPNOTSUPP;
 	if (vma->class == CRIU_VMA_ANON_PRIVATE)
 		*policy = CRIU_VMA_DUMP_PRIVATE_ANON;
 	else if (vma->class == CRIU_VMA_FILE_PRIVATE)
@@ -71,8 +72,12 @@ static int dump_one_vma(const struct criu_vma_info *vma, void *arg)
 	int ret;
 
 	ret = classify_policy(vma, &policy);
-	if (ret)
+	if (ret) {
+		pr_info("criu_dump_mm: reject vma=%lx-%lx class=%u special=%u flags=%lx path=%s ret=%d\n",
+			vma->start, vma->end, vma->class, vma->special,
+			vma->vm_flags_raw, vma->path[0] ? vma->path : "-", ret);
 		return ret;
+	}
 	memset(&rec, 0, sizeof(rec));
 	rec.start = vma->start;
 	rec.end = vma->end;
@@ -93,37 +98,48 @@ static int dump_one_vma(const struct criu_vma_info *vma, void *arg)
 int criu_dump_mm(struct task_struct *task,
 		 struct criu_snapshot_writer *writer)
 {
-	struct criu_mm_info mm;
+	struct criu_snapshot snapshot;
 	struct criu_mm_record rec;
 	struct dump_mm_ctx ctx = { .writer = writer };
+	unsigned long i;
 	int ret;
 
 	if (!task || !writer)
 		return -EINVAL;
-	ret = criu_collect_mm_info(task, &mm);
+	/*
+	 * Capture the VMA descriptions while holding mmap_lock, then write the
+	 * snapshot records after the lock is released. kernel_write() may acquire
+	 * filesystem locks that can fault user pages and take mmap_lock itself.
+	 */
+	ret = criu_snapshot_capture(task, &snapshot, false);
 	if (ret)
 		return ret;
 	memset(&rec, 0, sizeof(rec));
-	rec.pid = mm.pid;
-	rec.tgid = mm.tgid;
-	rec.total_vm = mm.total_vm;
-	rec.start_code = mm.start_code;
-	rec.end_code = mm.end_code;
-	rec.start_data = mm.start_data;
-	rec.end_data = mm.end_data;
-	rec.start_brk = mm.start_brk;
-	rec.brk = mm.brk;
-	rec.start_stack = mm.start_stack;
-	rec.arg_start = mm.arg_start;
-	rec.arg_end = mm.arg_end;
-	rec.env_start = mm.env_start;
-	rec.env_end = mm.env_end;
-	rec.vma_count = mm.vma_count;
+	rec.pid = snapshot.mm.pid;
+	rec.tgid = snapshot.mm.tgid;
+	rec.total_vm = snapshot.mm.total_vm;
+	rec.start_code = snapshot.mm.start_code;
+	rec.end_code = snapshot.mm.end_code;
+	rec.start_data = snapshot.mm.start_data;
+	rec.end_data = snapshot.mm.end_data;
+	rec.start_brk = snapshot.mm.start_brk;
+	rec.brk = snapshot.mm.brk;
+	rec.start_stack = snapshot.mm.start_stack;
+	rec.arg_start = snapshot.mm.arg_start;
+	rec.arg_end = snapshot.mm.arg_end;
+	rec.env_start = snapshot.mm.env_start;
+	rec.env_end = snapshot.mm.env_end;
+	rec.vma_count = snapshot.mm.vma_count;
 	ret = criu_snapshot_writer_record(writer, CRIU_SNAPSHOT_REC_MM, 0,
 					  &rec, sizeof(rec));
-	if (ret)
-		return ret;
-	ret = criu_walk_vmas(task, dump_one_vma, &ctx);
+	if (!ret) {
+		for (i = 0; i < snapshot.mm.vma_count; i++) {
+			ret = dump_one_vma(&snapshot.vmas[i], &ctx);
+			if (ret)
+				break;
+		}
+	}
+	criu_snapshot_destroy(&snapshot);
 	if (ret)
 		return ret == -EOPNOTSUPP ? -EOPNOTSUPP : ret;
 	/* Scan only resident pages and emit inline PAGE_RUN records. */

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/errno.h>
 #include <linux/mm.h>
+#include <linux/printk.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
@@ -60,20 +61,26 @@ int criu_dump_process(pid_t vpid, const char *path)
 	/* Bind the operation to the selected target and its A2 generation. */
 	task = criu_target_get(&generation);
 	if (!task || task_pid_vnr(task) != vpid) {
+		pr_info("criu_dump: initial target failed requested=%d task=%p task_pid=%d generation=%llu\n",
+			vpid, task, task ? task_pid_vnr(task) : -1, generation);
 		if (task)
 			put_task_struct(task);
 		return -ESRCH;
 	}
 	mm = get_task_mm(task);
 	if (!mm) {
+		pr_info("criu_dump: get_task_mm failed pid=%d\n", vpid);
 		put_task_struct(task);
 		return -ESRCH;
 	}
 	ret = criu_collect_mm_info(task, &mm_info);
-	if (ret)
+	if (ret) {
+		pr_info("criu_dump: collect_mm_info failed pid=%d ret=%d\n", vpid, ret);
 		goto out;
+	}
 
 	ret = criu_freeze(vpid, false, &freeze_ctx);
+	pr_info("criu_dump: freeze pid=%d ret=%d ctx=%p\n", vpid, ret, freeze_ctx);
 	if (ret)
 		goto out;
 
@@ -99,10 +106,13 @@ int criu_dump_process(pid_t vpid, const char *path)
 		goto thaw;
 	opened = true;
 	ret = criu_dump_task(task, &writer);
+	pr_info("criu_dump: dump_task pid=%d ret=%d\n", vpid, ret);
 	if (!ret)
 		ret = criu_dump_mm(task, &writer);
+	pr_info("criu_dump: dump_mm pid=%d ret=%d\n", vpid, ret);
 	if (!ret)
 		ret = criu_dump_files(task, &writer);
+	pr_info("criu_dump: dump_files pid=%d ret=%d\n", vpid, ret);
 	if (!ret)
 		ret = dump_revalidate(task, generation, mm, mm_info.vma_count);
 	if (!ret)
@@ -115,7 +125,9 @@ int criu_dump_process(pid_t vpid, const char *path)
 
 thaw:
 	/* Thaw is unconditional once freeze succeeded, including writer failures. */
+	pr_info("criu_dump: thaw begin pid=%d\n", vpid);
 	thaw_ret = criu_thaw(freeze_ctx);
+	pr_info("criu_dump: thaw end pid=%d ret=%d\n", vpid, thaw_ret);
 	if (!ret && thaw_ret)
 		ret = thaw_ret;
 out:

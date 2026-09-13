@@ -12,13 +12,24 @@ VERSION="${KVERSION:-5.10.29}"
 KROOT="${KROOT:-$HOME/kernels}"
 KDIR="$KROOT/linux-$VERSION"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The Lima /Users mount can expose host-native binaries to nested QEMU even
+# after an ARM64 build in Lima.  Stage the complete project on Lima-local
+# storage so the guest sees the Linux ELF artifacts produced by that build.
+QEMU_PROJECT_DIR="$(mktemp -d /tmp/criu-module-qemu.XXXXXX)"
+cp -a "$PROJECT_DIR"/. "$QEMU_PROJECT_DIR"/
+if [ "$(uname -s)" = Linux ] && [ -f "$QEMU_PROJECT_DIR/userspace/Makefile" ]; then
+	# Rebuild executable artifacts inside the Lima-local staging tree.  A
+	# source tree mounted from macOS may contain Mach-O files even when the
+	# same path looked like an ELF during the Lima build.
+	make -C "$QEMU_PROJECT_DIR/userspace" clean all >/dev/null
+fi
 
 GDB=0
 CI=0
 SCRIPT=""
 MEM="${MEM:-2G}"
 CPUS="${CPUS:-2}"
-STATUS_FILE="$PROJECT_DIR/.qemu-guest.status"
+STATUS_FILE="$QEMU_PROJECT_DIR/.qemu-guest.status"
 CPU_MODEL="${QEMU_CPU:-cortex-a72}"
 
 while [ $# -gt 0 ]; do
@@ -45,8 +56,8 @@ done
 # The guest's /init runs /mnt/host/guest-script.sh if present. Stage the
 # requested script there, and clean it up on exit so an interactive run later
 # does not silently execute a stale script.
-GUEST_ENTRY="$PROJECT_DIR/guest-script.sh"
-cleanup() { rm -f "$GUEST_ENTRY" "$STATUS_FILE"; }
+GUEST_ENTRY="$QEMU_PROJECT_DIR/guest-script.sh"
+cleanup() { rm -f "$GUEST_ENTRY" "$STATUS_FILE"; rm -rf "$QEMU_PROJECT_DIR"; }
 trap cleanup EXIT
 rm -f "$GUEST_ENTRY" "$STATUS_FILE"
 
@@ -76,7 +87,14 @@ QEMU_ARGS=(
 	-no-reboot
 	# 9p passthrough: guest sees this repo at /mnt/host, no image rebuild
 	# needed between edits.
-	-virtfs "local,path=$PROJECT_DIR,mount_tag=hostshare,security_model=none,id=hostshare"
+	-virtfs "local,path=$QEMU_PROJECT_DIR,mount_tag=hostshare,security_model=none,id=hostshare"
+	# The fallback initramfs is intentionally tiny.  These read-only 9p mounts
+	# expose the Lima build guest's ARM64 runtime so the guest can run the
+	# dynamically linked CRIU and Python/crit without copying host binaries into
+	# the target rootfs.  Kernel-module and target-process execution remain in
+	# the 5.10.29 guest.
+	-virtfs "local,path=/usr,mount_tag=limausr,security_model=none,id=limausr,readonly=on"
+	-virtfs "local,path=/lib,mount_tag=limalib,security_model=none,id=limalib,readonly=on"
 	-append "console=ttyAMA0 panic=1 oops=panic nokaslr loglevel=7"
 )
 
