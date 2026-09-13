@@ -683,6 +683,25 @@ files 和 fs 的字段差异。该比较失败不改变已验证的真实 `criu 
 - [ ] dmesg 干净;`rmmod` 后无 slab 泄漏
 - [ ] 镜像格式没有任何自创字段(与 `criu/images/*.proto` 严格一致)
 
+### 核心发布后的扩展验证任务
+
+下列项目**不阻塞已发布的 A3 核心门禁**（模块 dump -> 真 `criu restore` -> 恢复进程
+存活），但必须在开始 A4-A8 前持续记录、验证并关闭。它们是后续工作的输入，不应再以
+“A3 核心未通过”描述。
+
+| ID | 后续任务 | 归属/优先级 | 完成证据 |
+|---|---|---|---|
+| A3-E1 | 收敛 `criu-field-compare.sh` 的镜像语义差异：`inventory` 的 `root_ids`，`core` 的任务/信号字段，`mm` 的 auxv、dumpable、VMA，`pagemap/pages` 的连续页与 lazy 标志，以及 `files`/`fs`/`creds` 的交叉引用。先逐项判定“允许差异”还是“缺失恢复语义”，再更新 converter 或显式差异白名单。 | A3 收尾，P1 | 同一 fixture 的字段比较仅包含经文档批准的差异；每次修改仍有 `A3_CROSS_RESTORE: PASS`。 |
+| A3-E2 | 执行并记录 14 个扩展用例。凡涉及多线程、pipe/普通文件/socket、信号/定时器、子进程或共享对象的失败，分别转入 A4/A5/A6/A7/A8，不将其误报为单进程 A3 回归。 | A3 验证，P1 | 用例表逐项有 PASS 或明确的后续阶段归属和复现命令。 |
+| A3-E3 | 建立 ZDTM allowlist：选择完全落在当前单进程边界内的候选测试，每个在 Lima+QEMU guest 连续通过三次才加入 `ci/zdtm-allowlist.txt`。 | A3 回归，P1 | allowlist 至少 3 条，`tests/ci-zdtm.sh` 逐条通过。 |
+| A3-E4 | 运行一次全量 ZDTM，按“缺少线程、FD、信号/定时器、进程树、共享对象、其他”统计失败原因；基于统计更新 A4/A5/A6/A7 的实际实施顺序。 | 里程碑规划，P2 | 失败统计附录及 `docs/03-Iteration-Plan.md` 的排序依据均已更新。 |
+| A3-E5 | 完成重复 dump/load/unload 的 dmesg 与 slab 对比，验证无 freezer、VMA、页扫描或 writer 资源残留。 | 稳定性，P2 | 记录重复次数、dmesg 检查结果和可解释的 slab 差异。 |
+| A3-E6 | 在 A3-E1 和 allowlist 稳定后恢复 GitHub CI 接入；在此之前以 Lima+QEMU 命令作为权威 gate。 | 自动化，P3 | 远程 CI 使用 Linux 5.10.29 QEMU，复现本地 gate。 |
+
+**当前总 smoke 状态：** A2 freezer gates 已全部通过；总 smoke 目前由 A3-E1 的
+`criu-field-compare.sh` 停止。该失败与 `A3_CROSS_RESTORE: PASS` 并存，不能被解释为
+freezer 阻塞。
+
 ### Task 10 验证记录(2026-09-13)
 
 Lima+QEMU 环境约定：macOS 只负责编辑、Git 和通过 `limactl shell` 编排；Lima `criu-dev` 负责构建，并在其中执行 `scripts/run-qemu.sh`；嵌套的 Linux 5.10.29 QEMU guest 是唯一允许 `insmod`、`rmmod` 和运行内核测试的环境。不要在 macOS 或 Lima 的 5.15 内核中直接加载模块。
