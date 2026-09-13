@@ -310,8 +310,10 @@ static int validate_model(const struct snapshot_model *model)
 		!model->creds.data && !model->fds.count && !model->vmas.count &&
 		!model->pages.count)
 		return 0; /* schema-only fixture used by converter-format.sh */
-	if (model->arch != ELF_ARCH_X86_64 && model->arch != ELF_ARCH_AARCH64)
+	if (model->arch != ELF_ARCH_X86_64 && model->arch != ELF_ARCH_AARCH64) {
+		fprintf(stderr, "converter: unsupported arch=%u\n", model->arch);
 		return SNAPSHOT_READER_UNSUPPORTED;
+	}
 	if (model->page_size == 0 || (model->page_size & (model->page_size - 1U)))
 		return SNAPSHOT_READER_FORMAT_ERROR;
 	if (model->task.len < TASK_FIXED_SIZE || !model->mm.data ||
@@ -341,9 +343,16 @@ static int validate_model(const struct snapshot_model *model)
 			return SNAPSHOT_READER_FORMAT_ERROR;
 		class = u32(vma + 28);
 		special = u32(vma + 32);
+		/* vDSO/vvar are represented by the kernel classifier as class=4
+		 * (unsupported ordinary mapping) but are explicitly supported special
+		 * mappings with their own CRIU status bits. */
 		if (class == VMA_CLASS_ANON_SHARED || class == VMA_CLASS_FILE_SHARED ||
-			class > VMA_CLASS_FILE_PRIVATE || special > VMA_SPECIAL_VVAR)
+			(class > VMA_CLASS_FILE_PRIVATE &&
+			 (special != VMA_SPECIAL_VDSO && special != VMA_SPECIAL_VVAR)) ||
+			special > VMA_SPECIAL_VVAR) {
+			fprintf(stderr, "converter: unsupported vma index=%zu class=%u special=%u\n", i, class, special);
 			return SNAPSHOT_READER_UNSUPPORTED;
+		}
 		if (u64(vma) >= u64(vma + 8) ||
 			copy_fixed_string(path, sizeof(path), vma + VMA_PATH_OFFSET, 512))
 			return SNAPSHOT_READER_FORMAT_ERROR;
@@ -1260,10 +1269,14 @@ int criu_emit_images(const struct snapshot_document *doc,
 	if (!doc || !options || !options->output_dir)
 		return SNAPSHOT_READER_FORMAT_ERROR;
 	ret = collect_records(doc, &model);
-	if (ret)
+	if (ret) {
+		fprintf(stderr, "converter: collect_records rc=%d\n", ret);
 		return ret;
+	}
 	ret = validate_model(&model);
 	if (ret || !model.task.data) {
+		if (ret)
+			fprintf(stderr, "converter: validate_model rc=%d\n", ret);
 		model_free(&model);
 		return ret;
 	}
@@ -1277,6 +1290,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 	}
 	ret = build_file_table(&model, &files);
 	if (ret) {
+		fprintf(stderr, "converter: build_file_table rc=%d\n", ret);
 		model_free(&model);
 		return ret;
 	}
@@ -1294,10 +1308,13 @@ int criu_emit_images(const struct snapshot_document *doc,
 	}
 
 	image_writer_init(&message);
+	fprintf(stderr, "converter: model validated vmas=%zu fds=%zu pages=%zu\n", model.vmas.count, model.fds.count, model.pages.count);
 	if (build_inventory(&message)) {
+		fprintf(stderr, "converter: build_inventory failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
+	fprintf(stderr, "converter: emit inventory.img\n");
 	if (emit_messages(options->output_dir, "inventory.img", INVENTORY_MAGIC,
 			&message, 1, true)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
@@ -1305,9 +1322,11 @@ int criu_emit_images(const struct snapshot_document *doc,
 	}
 	message.len = 0;
 	if (build_pstree(&model.task, &message)) {
+		fprintf(stderr, "converter: build_pstree failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
+	fprintf(stderr, "converter: emit pstree.img\n");
 	if (emit_messages(options->output_dir, "pstree.img", PSTREE_MAGIC,
 			&message, 1, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
@@ -1315,20 +1334,24 @@ int criu_emit_images(const struct snapshot_document *doc,
 	}
 	message.len = 0;
 	if (build_core(&model, comm, &message)) {
+		fprintf(stderr, "converter: build_core failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	snprintf(name, sizeof(name), "core-%u.img", u32(model.task.data));
+	fprintf(stderr, "converter: emit %s\n", name);
 	if (emit_messages(options->output_dir, name, CORE_MAGIC, &message, 1, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	message.len = 0;
 	if (build_mm(&model, &files, &message)) {
+		fprintf(stderr, "converter: build_mm failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	snprintf(name, sizeof(name), "mm-%u.img", u32(model.task.data));
+	fprintf(stderr, "converter: emit %s\n", name);
 	if (emit_messages(options->output_dir, name, MM_MAGIC, &message, 1, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
@@ -1336,10 +1359,12 @@ int criu_emit_images(const struct snapshot_document *doc,
 	message.len = 0;
 	if (build_page_messages(&model, &page_messages, &page_count, &page_data,
 			&page_data_len)) {
+		fprintf(stderr, "converter: build_page_messages failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	snprintf(name, sizeof(name), "pagemap-%u.img", u32(model.task.data));
+	fprintf(stderr, "converter: emit %s and pages-1.img (runs=%zu bytes=%zu)\n", name, page_count, page_data_len);
 	if (emit_messages(options->output_dir, name, PAGEMAP_MAGIC, page_messages,
 			page_count, false) || emit_raw(options->output_dir, "pages-1.img",
 			page_data, page_data_len)) {
@@ -1363,6 +1388,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 			goto out_message;
 		}
 	}
+	fprintf(stderr, "converter: emit files.img/reg-files.img (files=%zu)\n", files.count);
 	if (emit_messages(options->output_dir, "files.img", FILES_MAGIC,
 			file_messages, files.count, false) ||
 		emit_messages(options->output_dir, "reg-files.img", REG_FILES_MAGIC,
@@ -1377,6 +1403,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 			goto out_message;
 		}
 	}
+	fprintf(stderr, "converter: emit fdinfo-1.img\n");
 	if (emit_messages(options->output_dir, "fdinfo-1.img", FDINFO_MAGIC,
 			fd_messages, 3, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
@@ -1384,30 +1411,36 @@ int criu_emit_images(const struct snapshot_document *doc,
 	}
 	message.len = 0;
 	if (build_ids(&message)) {
+		fprintf(stderr, "converter: build ids failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	snprintf(name, sizeof(name), "ids-%u.img", u32(model.task.data));
+	fprintf(stderr, "converter: emit %s\n", name);
 	if (emit_messages(options->output_dir, name, IDS_MAGIC, &message, 1, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	message.len = 0;
 	if (build_fs(&files, &message)) {
+		fprintf(stderr, "converter: build fs failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	snprintf(name, sizeof(name), "fs-%u.img", u32(model.task.data));
+	fprintf(stderr, "converter: emit %s\n", name);
 	if (emit_messages(options->output_dir, name, FS_MAGIC, &message, 1, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	message.len = 0;
 	if (build_creds(&model.creds, &message)) {
+		fprintf(stderr, "converter: build creds failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
 	snprintf(name, sizeof(name), "creds-%u.img", u32(model.task.data));
+	fprintf(stderr, "converter: emit %s\n", name);
 	if (emit_messages(options->output_dir, name, CREDS_MAGIC, &message, 1, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
