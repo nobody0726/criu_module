@@ -74,6 +74,8 @@ struct criu_snapshot {
 };
 
 struct criu_freeze_ctx;
+struct criu_objmap;
+struct file;
 
 struct criu_freeze_status {
 	char state[16];
@@ -87,6 +89,12 @@ struct criu_freeze_status {
 };
 
 typedef int (*criu_vma_info_fn)(const struct criu_vma_info *info, void *arg);
+typedef int (*criu_fd_fn)(unsigned int fd, struct file *file, void *arg);
+
+struct criu_objmap *criu_objmap_new(void);
+void criu_objmap_free(struct criu_objmap *map);
+u32 criu_objmap_get(struct criu_objmap *map, const void *obj, bool *is_new);
+int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg);
 
 int criu_target_set(pid_t pid);
 struct task_struct *criu_target_get(u64 *generation);

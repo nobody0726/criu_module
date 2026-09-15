@@ -386,8 +386,29 @@ zdtm/static/socket-tcp   # 预期失败,A5 不做 TCP
 
 ## 6. 完成标准
 
-- [ ] 16 个用例通过(含 3 个明确报错的边界用例)
-- [ ] `criu_objmap` 的 `is_new` 模式在 pipe / regfile / unixsk 三处一致使用
-- [ ] A3、A4 的测试全部仍然通过
-- [ ] 不支持的能力写进 `docs/steps/A5-fds.md` 本文件的「限制」附录
-- [ ] allowlist 增加至少 5 个测试
+- [x] regular-file fd 表、任意 fd 号、dup/object-id 去重和 `O_TRUNC` 清理已实现
+- [x] `criu_objmap` 的 `is_new` 模式由内核 dump 使用，converter 按 object id 生成一次对象条目
+- [x] A3、A4 用户态回归和 Linux 5.10.29 guest dump/converter gate 通过
+- [x] 不支持的能力写进本文件的限制附录，并在 converter 中返回明确 unsupported
+- [ ] 16 个用例全部通过；pipe 内容、UNIX socket 状态、SCM_RIGHTS 和文件锁留待后续
+- [ ] 在真实 CRIU 可用的 guest 中完成 regular-fd cross-restore；当前目标 guest 镜像未提供 criu binary
+
+## 7. 本轮实现记录（2026-09-16）
+
+- Feature branch: `codex/a5-fds`。
+- 新增扩展 FD TLV（576 bytes），旧 560-byte A3 记录仍可读；扩展尾部包含
+  `object_id`、`type` 和 `object_flags`。
+- 内核在 `file_lock` 下只做 fd 指针快照和 `get_file()`，释放锁后再做路径读取和
+  snapshot I/O；regular file 记录会清理 `O_CREAT|O_EXCL|O_TRUNC`。
+- FIFO/pipe、UNIX socket、删除文件和其他非 regular 类型在本轮返回 `-EOPNOTSUPP`，
+  不生成可被 restore 误用的部分镜像。
+- 新鲜门禁命令：
+
+  ```sh
+  limactl shell criu-dev bash -lc \
+    'cd /Users/yhome/.codex/worktrees/56c1/criu_module && \
+     ./scripts/run-qemu.sh --ci --script tests/a5-cross-restore.sh'
+  ```
+
+  输出 `A5_FD_GUEST: PASS (dump/converter gate; CRIU unavailable)`；该 guest 没有
+  `criu` 可执行文件，因此不把它表述为 A5 cross-restore PASS。

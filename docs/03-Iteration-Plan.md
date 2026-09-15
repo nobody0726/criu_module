@@ -96,7 +96,7 @@ mini-restore 落点。S0 的完整实测记录和配置 hash 见
 | **A2** | 冻结 / 解冻 | 1 周 | 可靠冻结多线程进程,无信号丢失 | [A2](steps/A2-freeze.md)、[设计](plans/2026-09-06-a2-freeze-design.md)、[计划](plans/2026-09-06-a2-freeze-implementation.md) |
 | **A3** | **极简进程完整 dump（核心 gate 已发布；扩展验证见 A3-E1 至 E6）** | 2-3 周 | `criu restore` 能恢复本模块产出的镜像 | [A3](steps/A3-minimal-dump.md)、[设计](plans/2026-09-11-a3-minimal-dump-design.md)、[计划](plans/2026-09-11-a3-minimal-dump-implementation.md) |
 | **A4** | 多线程 | 1-2 周 | 每线程 `core-$tid.img` | [A4](steps/A4-threads.md)、[计划](plans/2026-09-15-a4-threads-implementation.md) |
-| **A5** | 文件描述符(pipe → 常规文件 → unix socket) | 2-3 周 | `files.img` / `fdinfo-*.img` | [A5](steps/A5-fds.md) |
+| **A5** | 文件描述符(pipe → 常规文件 → unix socket) | 2-3 周 | `files.img` / `fdinfo-*.img` | [A5](steps/A5-fds.md)、[设计](plans/2026-09-16-a5-fds-design.md)、[计划](plans/2026-09-16-a5-fds-implementation.md) |
 | **A6** | 信号与定时器 | 1-2 周 | `sigacts-*.img` / `timer*.img` | [A6](steps/A6-signals-timers.md) |
 | **A7** | 进程树 + session/pgid | 1-2 周 | 多进程 `pstree.img` | [A7](steps/A7-pstree.md) |
 | **A8** | 共享资源去重 | 1-2 周 | 跨任务共享的 pipe / SHM 只存一份 | [A8](steps/A8-shared-resources.md) |

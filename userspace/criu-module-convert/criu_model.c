@@ -42,6 +42,8 @@
 #define MM_RECORD_SIZE 112U
 #define VMA_RECORD_SIZE 604U
 #define FD_RECORD_SIZE 560U
+#define FD_OBJECT_ID_OFFSET 560U
+#define FD_TYPE_OFFSET 568U
 #define FS_RECORD_SIZE 1024U
 #define CREDS_RECORD_SIZE 76U
 #define PAGE_RECORD_SIZE 24U
@@ -116,14 +118,23 @@ struct file_item {
 	uint64_t ino;
 	uint64_t size;
 	bool has_size;
+	uint64_t object_id;
+	uint32_t type;
 	char path[512];
+};
+
+struct fd_binding {
+	uint32_t fd;
+	uint32_t id;
 };
 
 struct file_table {
 	struct file_item *items;
 	size_t count;
 	size_t capacity;
-	uint32_t fd_ids[3];
+	struct fd_binding *bindings;
+	size_t binding_count;
+	size_t binding_capacity;
 	uint32_t exe_id;
 	uint32_t cwd_id;
 	uint32_t root_id;
@@ -307,10 +318,9 @@ static int copy_fixed_string(char *out, size_t out_size,
 
 static int validate_model(const struct snapshot_model *model)
 {
-	size_t i;
+	size_t i, j;
 	uint32_t expected_vmas;
 	uint64_t previous_page_end = 0;
-	size_t fd_seen = 0;
 
 	if (!model->task.data)
 		return 0;
@@ -328,7 +338,7 @@ static int validate_model(const struct snapshot_model *model)
 		model->mm.len < MM_RECORD_SIZE || !model->regs.data ||
 		model->regs.len < sizeof(uint32_t) || !model->fs.data ||
 		model->fs.len < FS_RECORD_SIZE || !model->creds.data ||
-		model->creds.len < CREDS_RECORD_SIZE || model->fds.count < 3U)
+		model->creds.len < CREDS_RECORD_SIZE || !model->fds.count)
 		return SNAPSHOT_READER_FORMAT_ERROR;
 	if (u32(model->task.data) != model->pid ||
 		u32(model->task.data + 4) != model->tgid ||
@@ -392,23 +402,30 @@ static int validate_model(const struct snapshot_model *model)
 			copy_fixed_string(path, sizeof(path), vma + VMA_PATH_OFFSET, 512))
 			return SNAPSHOT_READER_FORMAT_ERROR;
 	}
-	if (model->fds.count > 3U)
-		return SNAPSHOT_READER_UNSUPPORTED;
 	for (i = 0; i < model->fds.count; i++) {
 		const uint8_t *fd = model->fds.items[i].data;
 		uint32_t fdno;
 		char path[512];
 
-		if (model->fds.items[i].len < FD_RECORD_SIZE)
+		uint32_t type = CRIU_FD_TYPE_REG;
+
+		if (model->fds.items[i].len != FD_RECORD_SIZE &&
+			model->fds.items[i].len < CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE)
 			return SNAPSHOT_READER_FORMAT_ERROR;
 		fdno = u32(fd);
-		if (fdno > 2U || copy_fixed_string(path, sizeof(path), fd + 48, 512))
+		if (model->fds.items[i].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE)
+			type = u32(fd + FD_TYPE_OFFSET);
+		if (type != CRIU_FD_TYPE_REG)
+			return SNAPSHOT_READER_UNSUPPORTED;
+		if (copy_fixed_string(path, sizeof(path), fd + 48, 512))
 			return SNAPSHOT_READER_FORMAT_ERROR;
-		if (fd_seen & (1U << fdno))
-			return SNAPSHOT_READER_FORMAT_ERROR;
-		fd_seen |= 1U << fdno;
+		if (fdno >= 1024U)
+			return SNAPSHOT_READER_UNSUPPORTED;
+		for (j = 0; j < i; j++)
+			if (u32(model->fds.items[j].data) == fdno)
+				return SNAPSHOT_READER_FORMAT_ERROR;
 	}
-	if (fd_seen != 0x7U)
+	if (!model->fds.count)
 		return SNAPSHOT_READER_FORMAT_ERROR;
 	for (i = 0; i < model->vmas.count; i++) {
 		const uint8_t *vma = model->vmas.items[i].data;
@@ -987,8 +1004,11 @@ error:
 }
 
 static int file_item_matches(const struct file_item *item, uint64_t dev,
-					uint64_t ino, const char *path)
+					 uint64_t ino, const char *path,
+					 uint64_t object_id)
 {
+	if (object_id && item->object_id)
+		return item->object_id == object_id;
 	if (dev && ino && item->dev == dev && item->ino == ino)
 		return 1;
 	return !strcmp(item->path, path);
@@ -1014,10 +1034,27 @@ static void fill_stat_fallback(struct file_item *item, bool directory)
 		item->mode = directory ? 040755U : 0100644U;
 }
 
+static int file_table_add_object(struct file_table *files, const char *path,
+				 uint64_t dev, uint64_t ino, uint32_t mode,
+				 uint64_t flags, uint64_t pos, uint64_t size,
+				 bool has_size, bool directory, uint64_t object_id,
+				 uint32_t type, uint32_t *id);
+
 static int file_table_add(struct file_table *files, const char *path,
 				 uint64_t dev, uint64_t ino, uint32_t mode,
 				 uint64_t flags, uint64_t pos, uint64_t size,
 				 bool has_size, bool directory, uint32_t *id)
+
+{
+	return file_table_add_object(files, path, dev, ino, mode, flags, pos,
+					 size, has_size, directory, 0, 0, id);
+}
+
+static int file_table_add_object(struct file_table *files, const char *path,
+				 uint64_t dev, uint64_t ino, uint32_t mode,
+				 uint64_t flags, uint64_t pos, uint64_t size,
+				 bool has_size, bool directory, uint64_t object_id,
+				 uint32_t type, uint32_t *id)
 {
 	struct file_item *item;
 	size_t i;
@@ -1025,7 +1062,10 @@ static int file_table_add(struct file_table *files, const char *path,
 	if (!path || !path[0] || strlen(path) >= sizeof(files->items[0].path))
 		return -1;
 	for (i = 0; i < files->count; i++)
-		if (file_item_matches(&files->items[i], dev, ino, path)) {
+		if (file_item_matches(&files->items[i], dev, ino, path, object_id)) {
+			if (object_id && (strcmp(files->items[i].path, path) ||
+				files->items[i].dev != dev || files->items[i].ino != ino))
+				return -1;
 			if (!files->items[i].mode)
 				files->items[i].mode = mode;
 			if (!files->items[i].has_size && has_size) {
@@ -1057,6 +1097,8 @@ static int file_table_add(struct file_table *files, const char *path,
 	item->pos = pos;
 	item->size = size;
 	item->has_size = has_size;
+	item->object_id = object_id;
+	item->type = type ? type : CRIU_FD_TYPE_REG;
 	memcpy(item->path, path, strlen(path) + 1U);
 	fill_stat_fallback(item, directory);
 	*id = item->id;
@@ -1073,7 +1115,30 @@ static int file_table_add_path(struct file_table *files, const char *path,
 static void file_table_free(struct file_table *files)
 {
 	free(files->items);
+	free(files->bindings);
 	memset(files, 0, sizeof(*files));
+}
+
+static int binding_add(struct file_table *files, uint32_t fd, uint32_t id)
+{
+	struct fd_binding *bindings;
+	size_t capacity;
+
+	if (files->binding_count == files->binding_capacity) {
+		capacity = files->binding_capacity ? files->binding_capacity * 2U : 8U;
+		if (capacity < files->binding_capacity ||
+			capacity > SIZE_MAX / sizeof(*bindings))
+			return -1;
+		bindings = realloc(files->bindings, capacity * sizeof(*bindings));
+		if (!bindings)
+			return -1;
+		files->bindings = bindings;
+		files->binding_capacity = capacity;
+	}
+	files->bindings[files->binding_count].fd = fd;
+	files->bindings[files->binding_count].id = id;
+	files->binding_count++;
+	return 0;
 }
 
 static int build_file_table(const struct snapshot_model *model,
@@ -1113,9 +1178,14 @@ static int build_file_table(const struct snapshot_model *model,
 		const uint8_t *fd = model->fds.items[0].data;
 		char path[512];
 		if (copy_fixed_string(path, sizeof(path), fd + 48, 512) ||
-			file_table_add(files, path, u64(fd + 24), u64(fd + 32),
+			file_table_add_object(files, path, u64(fd + 24), u64(fd + 32),
 				u32(fd + 4), u64(fd + 8), u64(fd + 16), u64(fd + 40),
-				true, false, &files->exe_id))
+				true, false,
+				model->fds.items[0].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
+					u64(fd + FD_OBJECT_ID_OFFSET) : 0,
+				model->fds.items[0].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
+					u32(fd + FD_TYPE_OFFSET) : CRIU_FD_TYPE_REG,
+				&files->exe_id))
 			goto error;
 	} else {
 		goto unsupported;
@@ -1135,10 +1205,17 @@ static int build_file_table(const struct snapshot_model *model,
 		const uint8_t *fd = model->fds.items[i].data;
 		uint32_t fdno = u32(fd);
 		char path[512];
-		if (fdno > 2U || copy_fixed_string(path, sizeof(path), fd + 48, 512) ||
-			file_table_add(files, path, u64(fd + 24), u64(fd + 32),
+		if (copy_fixed_string(path, sizeof(path), fd + 48, 512) ||
+			file_table_add_object(files, path, u64(fd + 24), u64(fd + 32),
 				u32(fd + 4), u64(fd + 8), u64(fd + 16), u64(fd + 40),
-				true, false, &files->fd_ids[fdno]))
+				true, false,
+				model->fds.items[i].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
+					u64(fd + FD_OBJECT_ID_OFFSET) : 0,
+				model->fds.items[i].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
+					u32(fd + FD_TYPE_OFFSET) : CRIU_FD_TYPE_REG,
+				&id))
+			goto error;
+		if (binding_add(files, fdno, id))
 			goto error;
 	}
 	if (copy_fixed_string(cwd, sizeof(cwd), model->fs.data, 512) ||
@@ -1146,9 +1223,10 @@ static int build_file_table(const struct snapshot_model *model,
 		file_table_add_path(files, cwd, 040755U, true, &files->cwd_id) ||
 		file_table_add_path(files, root, 040755U, true, &files->root_id))
 		goto error;
-	for (i = 0; i < 3; i++)
-		if (!files->fd_ids[i])
-			goto unsupported;
+	if (!files->binding_count)
+		goto unsupported;
+	if (!files->exe_id)
+		files->exe_id = files->bindings[0].id;
 	return 0;
 
 unsupported:
@@ -1168,7 +1246,8 @@ static int build_reg_file(const struct file_item *item,
 
 	image_writer_init(&fown);
 	ret = image_writer_field_varint(message, 1, item->id) ||
-		image_writer_field_varint(message, 2, item->flags) ||
+		image_writer_field_varint(message, 2,
+			item->flags & ~(uint64_t)(O_CREAT | O_EXCL | O_TRUNC)) ||
 		image_writer_field_varint(message, 3, item->pos);
 	if (!ret)
 		ret = build_fown(creds, &fown);
@@ -1206,10 +1285,10 @@ static int build_file_entry(const struct file_item *item,
 static int build_fdinfo(const struct file_table *files, unsigned fd,
 				struct image_writer *message)
 {
-	return image_writer_field_varint(message, 1, files->fd_ids[fd]) ||
+	return image_writer_field_varint(message, 1, files->bindings[fd].id) ||
 		image_writer_field_varint(message, 2, 0) ||
 		image_writer_field_varint(message, 3, 1) ||
-		image_writer_field_varint(message, 4, fd);
+		image_writer_field_varint(message, 4, files->bindings[fd].fd);
 }
 
 static int build_inventory(struct image_writer *message)
@@ -1521,7 +1600,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 
 	file_messages = calloc(files.count, sizeof(*file_messages));
 	reg_messages = calloc(files.count, sizeof(*reg_messages));
-	fd_messages = calloc(3, sizeof(*fd_messages));
+	fd_messages = calloc(files.binding_count, sizeof(*fd_messages));
 	if (!file_messages || !reg_messages || !fd_messages) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
@@ -1543,7 +1622,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < files.binding_count; i++) {
 		image_writer_init(&fd_messages[i]);
 		if (build_fdinfo(&files, (unsigned)i, &fd_messages[i])) {
 			ret = SNAPSHOT_READER_IO_ERROR;
@@ -1552,7 +1631,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 	}
 	fprintf(stderr, "converter: emit fdinfo-1.img\n");
 	if (emit_messages(options->output_dir, "fdinfo-1.img", FDINFO_MAGIC,
-			fd_messages, 3, false)) {
+				  fd_messages, files.binding_count, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
@@ -1598,7 +1677,7 @@ out_message:
 	image_writer_free(&message);
 	free_messages(file_messages, files.count);
 	free_messages(reg_messages, files.count);
-	free_messages(fd_messages, 3);
+	free_messages(fd_messages, files.binding_count);
 	free_messages(page_messages, page_count);
 	free(page_data);
 out:

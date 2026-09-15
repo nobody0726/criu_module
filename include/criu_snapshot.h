@@ -28,6 +28,8 @@ typedef __u64 uint64_t;
 #define CRIU_SNAPSHOT_MAX_RECORD_SIZE (64U * 1024U * 1024U)
 #define CRIU_SNAPSHOT_MAX_TOTAL_SIZE (1024ULL * 1024ULL * 1024ULL)
 #define CRIU_SNAPSHOT_THREAD_REG_BYTES 512U
+#define CRIU_SNAPSHOT_FD_RECORD_SIZE 560U
+#define CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE 576U
 #define CRIU_SNAPSHOT_HEADER_FLAGS 0U
 #define CRIU_SNAPSHOT_TLV_FLAGS 0U
 #define CRIU_SNAPSHOT_FOOTER_FLAGS 0U
@@ -57,6 +59,13 @@ enum criu_snapshot_status {
 	CRIU_SNAPSHOT_INCONSISTENT = 2,
 	CRIU_SNAPSHOT_IO_ERROR = 3,
 	CRIU_SNAPSHOT_FORMAT_ERROR = 4,
+};
+
+enum criu_snapshot_fd_type {
+	CRIU_FD_TYPE_REG = 1,
+	CRIU_FD_TYPE_PIPE = 2,
+	CRIU_FD_TYPE_UNIX = 3,
+	CRIU_FD_TYPE_FIFO = 4,
 };
 
 /* Packed sizes are part of the ABI; do not use these as kernel structs. */
@@ -101,6 +110,21 @@ struct criu_snapshot_thread_record {
 	uint8_t regs[CRIU_SNAPSHOT_THREAD_REG_BYTES];
 } CRIU_SNAPSHOT_PACKED;
 
+/* A5 appends metadata after the A3 path so 560-byte records stay readable. */
+struct criu_snapshot_fd_record {
+	uint32_t fd;
+	uint32_t mode;
+	uint64_t flags;
+	uint64_t pos;
+	uint64_t dev;
+	uint64_t ino;
+	uint64_t size;
+	char path[512];
+	uint64_t object_id;
+	uint32_t type;
+	uint32_t object_flags;
+} CRIU_SNAPSHOT_PACKED;
+
 #if defined(__cplusplus)
 static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
@@ -109,6 +133,7 @@ static_assert(sizeof(struct criu_snapshot_footer) == CRIU_SNAPSHOT_FOOTER_SIZE, 
 _Static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 _Static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
 _Static_assert(sizeof(struct criu_snapshot_footer) == CRIU_SNAPSHOT_FOOTER_SIZE, "snapshot footer ABI size");
+_Static_assert(sizeof(struct criu_snapshot_fd_record) == CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE, "snapshot fd ABI size");
 #endif
 
 /* Checksum covers header with checksum field zeroed followed by all TLVs; footer is excluded. */

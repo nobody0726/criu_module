@@ -3,6 +3,8 @@
 #define CRIU_DUMP_FILES_H
 
 #include <linux/sched.h>
+#include "../../include/criu_snapshot.h"
+#include "../include/criu_kernel.h"
 #include "snapshot_writer.h"
 
 #define CRIU_SNAPSHOT_REC_FD 5
@@ -11,15 +13,10 @@
 #define CRIU_FILE_PATH_MAX 512
 
 struct criu_fd_record {
-	__u32 fd;
-	__u32 mode;
-	__u64 flags;
-	__u64 pos;
-	__u64 dev;
-	__u64 ino;
-	__u64 size;
-	char path[CRIU_FILE_PATH_MAX];
+	struct criu_snapshot_fd_record abi;
 } __attribute__((packed));
+
+int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg);
 
 struct criu_fs_record {
 	char cwd[CRIU_FILE_PATH_MAX];
