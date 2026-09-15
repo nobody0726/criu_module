@@ -13,6 +13,7 @@
 #include "dump_files.h"
 #include "dump_mm.h"
 #include "dump_task.h"
+#include "dump_threads.h"
 #include "snapshot_writer.h"
 
 static int dump_revalidate(struct task_struct *task, u64 generation,
@@ -107,6 +108,8 @@ int criu_dump_process(pid_t vpid, const char *path)
 	opened = true;
 	ret = criu_dump_task(task, &writer);
 	pr_info("criu_dump: dump_task pid=%d ret=%d\n", vpid, ret);
+	if (!ret)
+		ret = criu_dump_threads(task, &writer);
 	if (!ret)
 		ret = criu_dump_mm(task, &writer);
 	pr_info("criu_dump: dump_mm pid=%d ret=%d\n", vpid, ret);

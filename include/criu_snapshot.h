@@ -27,6 +27,7 @@ typedef __u64 uint64_t;
 #define CRIU_SNAPSHOT_MAX_RECORDS 65536U
 #define CRIU_SNAPSHOT_MAX_RECORD_SIZE (64U * 1024U * 1024U)
 #define CRIU_SNAPSHOT_MAX_TOTAL_SIZE (1024ULL * 1024ULL * 1024ULL)
+#define CRIU_SNAPSHOT_THREAD_REG_BYTES 512U
 #define CRIU_SNAPSHOT_HEADER_FLAGS 0U
 #define CRIU_SNAPSHOT_TLV_FLAGS 0U
 #define CRIU_SNAPSHOT_FOOTER_FLAGS 0U
@@ -46,6 +47,7 @@ enum criu_snapshot_record_type {
 	CRIU_SNAPSHOT_REC_CREDS = 7,
 	CRIU_SNAPSHOT_REC_IDMAP = 8,
 	CRIU_SNAPSHOT_REC_PAGE_RUN = 9,
+	CRIU_SNAPSHOT_REC_THREAD = 10,
 	CRIU_SNAPSHOT_REC_END = 0xffff,
 };
 
@@ -86,6 +88,17 @@ struct criu_snapshot_footer {
 	uint32_t version;
 	uint32_t record_count;
 	uint64_t checksum;
+} CRIU_SNAPSHOT_PACKED;
+
+/* Per-thread state is emitted once for each member of the thread group. */
+struct criu_snapshot_thread_record {
+	uint32_t tid;
+	uint32_t tgid;
+	uint32_t regs_size;
+	uint32_t reserved;
+	uint64_t tls;
+	uint8_t blocked[8];
+	uint8_t regs[CRIU_SNAPSHOT_THREAD_REG_BYTES];
 } CRIU_SNAPSHOT_PACKED;
 
 #if defined(__cplusplus)

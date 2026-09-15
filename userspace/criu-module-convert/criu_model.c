@@ -45,6 +45,8 @@
 #define FS_RECORD_SIZE 1024U
 #define CREDS_RECORD_SIZE 76U
 #define PAGE_RECORD_SIZE 24U
+#define THREAD_RECORD_SIZE (16U + 8U + 8U + CRIU_SNAPSHOT_THREAD_REG_BYTES)
+#define THREAD_REGS_OFFSET 32U
 
 /* Packed criu_vma_record layout. The path follows four page counters. */
 #define VMA_FLAGS_OFFSET 40U
@@ -98,6 +100,7 @@ struct snapshot_model {
 	struct blob_list vmas;
 	struct blob_list fds;
 	struct blob_list pages;
+	struct blob_list threads;
 	uint32_t arch;
 	uint32_t page_size;
 	uint32_t pid;
@@ -157,6 +160,7 @@ static void model_free(struct snapshot_model *model)
 	free(model->vmas.items);
 	free(model->fds.items);
 	free(model->pages.items);
+	free(model->threads.items);
 	memset(model, 0, sizeof(*model));
 }
 
@@ -259,6 +263,10 @@ static int collect_records(const struct snapshot_document *doc,
 			if (list_add(&model->pages, payload, len))
 				goto io_error;
 			break;
+		case CRIU_SNAPSHOT_REC_THREAD:
+			if (list_add(&model->threads, payload, len))
+				goto io_error;
+			break;
 		default:
 			/* snapshot_read_validate() handled mandatory unknown records. */
 			break;
@@ -308,7 +316,7 @@ static int validate_model(const struct snapshot_model *model)
 		return 0;
 	if (!model->mm.data && !model->regs.data && !model->fs.data &&
 		!model->creds.data && !model->fds.count && !model->vmas.count &&
-		!model->pages.count)
+		!model->pages.count && !model->threads.count)
 		return 0; /* schema-only fixture used by converter-format.sh */
 	if (model->arch != ELF_ARCH_X86_64 && model->arch != ELF_ARCH_AARCH64) {
 		fprintf(stderr, "converter: unsupported arch=%u\n", model->arch);
@@ -328,6 +336,33 @@ static int validate_model(const struct snapshot_model *model)
 		u32(model->mm.data + 4) != model->tgid ||
 		u32(model->task.data + 44) > TASK_RLIMIT_MAX)
 		return SNAPSHOT_READER_FORMAT_ERROR;
+	if (model->threads.count) {
+		bool leader_seen = false;
+
+		for (i = 0; i < model->threads.count; i++) {
+			const uint8_t *thread = model->threads.items[i].data;
+			uint32_t tid;
+			uint32_t tgid;
+			uint32_t regs_size;
+			size_t j;
+
+			if (model->threads.items[i].len != THREAD_RECORD_SIZE)
+				return SNAPSHOT_READER_FORMAT_ERROR;
+			tid = u32(thread);
+			tgid = u32(thread + 4);
+			regs_size = u32(thread + 8);
+			if (!tid || tgid != model->tgid || !regs_size ||
+				regs_size > CRIU_SNAPSHOT_THREAD_REG_BYTES)
+				return SNAPSHOT_READER_FORMAT_ERROR;
+			if (tid == model->pid)
+				leader_seen = true;
+			for (j = 0; j < i; j++)
+				if (u32(model->threads.items[j].data) == tid)
+					return SNAPSHOT_READER_FORMAT_ERROR;
+		}
+		if (!leader_seen)
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	}
 	expected_vmas = u32(model->mm.data + 104);
 	if (expected_vmas != model->vmas.count)
 		return SNAPSHOT_READER_FORMAT_ERROR;
@@ -622,19 +657,26 @@ static int build_sas(struct image_writer *message)
 }
 
 static int build_thread_core(const struct snapshot_model *model,
+				 const struct blob_ref *thread_record,
 				 const char comm[TASK_COMM_SIZE],
 				 struct image_writer *message)
 {
 	struct image_writer sas;
 	struct image_writer creds;
+	uint64_t blocked;
 	int ret;
 
 	image_writer_init(&sas);
 	image_writer_init(&creds);
+	blocked = task_field_u64(&model->task, 48);
+
+	if (thread_record && thread_record->len >= 24U)
+		blocked = u64(thread_record->data + 24);
 	ret = image_writer_field_varint(message, 1, 0) ||
 		image_writer_field_varint(message, 2, 0) ||
 		image_writer_field_sint64(message, 3, 0) ||
-		image_writer_field_varint(message, 4, 0);
+		image_writer_field_varint(message, 4, 0) ||
+		image_writer_field_varint(message, 6, blocked);
 	if (!ret)
 		ret = build_sas(&sas);
 	if (!ret)
@@ -765,6 +807,9 @@ static int build_ids(struct image_writer *message)
 }
 
 static int build_core(const struct snapshot_model *model,
+				const struct blob_ref *regs,
+				const struct blob_ref *thread_record,
+				bool leader,
 				const char comm[TASK_COMM_SIZE],
 				struct image_writer *message)
 {
@@ -772,33 +817,53 @@ static int build_core(const struct snapshot_model *model,
 	struct image_writer ids;
 	struct image_writer thread_core;
 	struct image_writer arch_info;
+	struct blob_ref effective_regs = *regs;
+	uint8_t thread_regs[sizeof(uint32_t) + CRIU_SNAPSHOT_THREAD_REG_BYTES +
+			    sizeof(uint64_t)];
 	int ret;
 	int mtype = arch_mtype(model->arch);
 
 	if (mtype < 0)
 		return -1;
+	if (thread_record) {
+		uint32_t regs_size = u32(thread_record->data + 8);
+
+		if (thread_record->len < THREAD_RECORD_SIZE ||
+			regs_size > CRIU_SNAPSHOT_THREAD_REG_BYTES)
+			return -1;
+		memset(thread_regs, 0, sizeof(thread_regs));
+		put32(thread_regs, regs_size);
+		memcpy(thread_regs + sizeof(regs_size),
+		       thread_record->data + THREAD_REGS_OFFSET, regs_size);
+		memcpy(thread_regs + sizeof(regs_size) + regs_size,
+		       thread_record->data + 16, sizeof(uint64_t));
+		effective_regs.data = thread_regs;
+		effective_regs.len = sizeof(regs_size) + regs_size + sizeof(uint64_t);
+	}
 	image_writer_init(&tc);
 	image_writer_init(&ids);
 	image_writer_init(&thread_core);
 	image_writer_init(&arch_info);
 	ret = image_writer_field_varint(message, 1, (uint64_t)mtype);
+	if (leader) {
+		if (!ret)
+			ret = build_task_core(model, comm, &tc);
+		if (!ret)
+			ret = add_nested(message, 3, &tc);
+		if (!ret)
+			ret = build_ids(&ids);
+		if (!ret)
+			ret = add_nested(message, 4, &ids);
+	}
 	if (!ret)
-		ret = build_task_core(model, comm, &tc);
-	if (!ret)
-		ret = add_nested(message, 3, &tc);
-	if (!ret)
-		ret = build_ids(&ids);
-	if (!ret)
-		ret = add_nested(message, 4, &ids);
-	if (!ret)
-		ret = build_thread_core(model, comm, &thread_core);
+		ret = build_thread_core(model, thread_record, comm, &thread_core);
 	if (!ret)
 		ret = add_nested(message, 5, &thread_core);
 	if (!ret) {
 		if (model->arch == ELF_ARCH_AARCH64)
-			ret = build_aarch64_thread_info(&model->regs, &arch_info);
+			ret = build_aarch64_thread_info(&effective_regs, &arch_info);
 		else
-			ret = build_x86_thread_info(&model->regs, &arch_info);
+			ret = build_x86_thread_info(&effective_regs, &arch_info);
 	}
 	if (!ret)
 		ret = add_nested(message, model->arch == ELF_ARCH_AARCH64 ? 8U : 2U,
@@ -1172,15 +1237,25 @@ static int build_inventory(struct image_writer *message)
 	return ret;
 }
 
-static int build_pstree(const struct blob_ref *task, struct image_writer *message)
+static int build_pstree(const struct snapshot_model *model,
+			struct image_writer *message)
 {
-	uint32_t pid = u32(task->data);
+	uint32_t pid = u32(model->task.data);
+	size_t i;
 
-	return image_writer_field_varint(message, 1, pid) ||
+	if (image_writer_field_varint(message, 1, pid) ||
 		image_writer_field_varint(message, 2, 0) ||
 		image_writer_field_varint(message, 3, pid) ||
-		image_writer_field_varint(message, 4, pid) ||
-		image_writer_field_varint(message, 5, pid);
+		image_writer_field_varint(message, 4, pid))
+		return -1;
+	if (model->threads.count) {
+		for (i = 0; i < model->threads.count; i++)
+			if (image_writer_field_varint(message, 5,
+					u32(model->threads.items[i].data)))
+				return -1;
+		return 0;
+	}
+	return image_writer_field_varint(message, 5, pid);
 }
 
 static int build_fs(const struct file_table *files, struct image_writer *message)
@@ -1371,7 +1446,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 		goto out_message;
 	}
 	message.len = 0;
-	if (build_pstree(&model.task, &message)) {
+	if (build_pstree(&model, &message)) {
 		fprintf(stderr, "converter: build_pstree failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
@@ -1382,17 +1457,39 @@ int criu_emit_images(const struct snapshot_document *doc,
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
 	}
-	message.len = 0;
-	if (build_core(&model, comm, &message)) {
-		fprintf(stderr, "converter: build_core failed\n");
-		ret = SNAPSHOT_READER_IO_ERROR;
-		goto out_message;
-	}
-	snprintf(name, sizeof(name), "core-%u.img", u32(model.task.data));
-	fprintf(stderr, "converter: emit %s\n", name);
-	if (emit_messages(options->output_dir, name, CORE_MAGIC, &message, 1, false)) {
-		ret = SNAPSHOT_READER_IO_ERROR;
-		goto out_message;
+	if (model.threads.count) {
+		for (i = 0; i < model.threads.count; i++) {
+			const struct blob_ref *thread = &model.threads.items[i];
+			uint32_t tid = u32(thread->data);
+
+			message.len = 0;
+			if (build_core(&model, &model.regs, thread,
+				       tid == model.pid, comm, &message)) {
+				fprintf(stderr, "converter: build_core tid=%u failed\n", tid);
+				ret = SNAPSHOT_READER_IO_ERROR;
+				goto out_message;
+			}
+			snprintf(name, sizeof(name), "core-%u.img", tid);
+			fprintf(stderr, "converter: emit %s\n", name);
+			if (emit_messages(options->output_dir, name, CORE_MAGIC,
+					  &message, 1, false)) {
+				ret = SNAPSHOT_READER_IO_ERROR;
+				goto out_message;
+			}
+		}
+	} else {
+		message.len = 0;
+		if (build_core(&model, &model.regs, NULL, true, comm, &message)) {
+			fprintf(stderr, "converter: build_core failed\n");
+			ret = SNAPSHOT_READER_IO_ERROR;
+			goto out_message;
+		}
+		snprintf(name, sizeof(name), "core-%u.img", u32(model.task.data));
+		fprintf(stderr, "converter: emit %s\n", name);
+		if (emit_messages(options->output_dir, name, CORE_MAGIC, &message, 1, false)) {
+			ret = SNAPSHOT_READER_IO_ERROR;
+			goto out_message;
+		}
 	}
 	message.len = 0;
 	if (build_mm(&model, &files, &message)) {

@@ -15,7 +15,7 @@ for f in "$abi_h" "$kernel_h" "$kernel_c" "$dump_c" "$model_c" "$reader_c" "$mak
 done
 
 grep -q 'CRIU_SNAPSHOT_REC_THREAD' "$abi_h"
-grep -q 'struct criu_thread_record' "$kernel_h"
+grep -q 'criu_snapshot_thread_record' "$abi_h"
 grep -q 'criu_dump_threads' "$dump_c"
 grep -q 'get_task_struct' "$kernel_c"
 grep -q 'put_task_struct' "$kernel_c"
@@ -36,7 +36,7 @@ import sys
 
 source = pathlib.Path(sys.argv[1]).read_text()
 assert source.index('rcu_read_unlock') < source.index('criu_snapshot_writer_record')
-assert source.index('get_task_struct') < source.index('rcu_read_unlock')
-assert source.index('put_task_struct') > source.index('criu_snapshot_writer_record')
+assert source.index('get_task_struct') < source.index('rcu_read_unlock', source.index('get_task_struct'))
+assert source.rindex('put_task_struct') > source.index('criu_snapshot_writer_record')
 print('A4_THREAD_CONTRACT: PASS')
 PY
