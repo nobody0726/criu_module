@@ -95,13 +95,16 @@ mini-restore 落点。S0 的完整实测记录和配置 hash 见
 | **A1** | 只读探针 + 对照 diff | 1-2 周 | 能读出 VMA 列表,与 `/proc` 逐字段一致 | [A1 步骤](steps/A1-readonly-probe.md)、[设计](plans/2026-09-06-a1-readonly-probe-design.md)、[计划](plans/2026-09-06-a1-readonly-probe.md) |
 | **A2** | 冻结 / 解冻 | 1 周 | 可靠冻结多线程进程,无信号丢失 | [A2](steps/A2-freeze.md)、[设计](plans/2026-09-06-a2-freeze-design.md)、[计划](plans/2026-09-06-a2-freeze-implementation.md) |
 | **A3** | **极简进程完整 dump（核心 gate 已发布；扩展验证见 A3-E1 至 E6）** | 2-3 周 | `criu restore` 能恢复本模块产出的镜像 | [A3](steps/A3-minimal-dump.md)、[设计](plans/2026-09-11-a3-minimal-dump-design.md)、[计划](plans/2026-09-11-a3-minimal-dump-implementation.md) |
-| **A4** | 多线程 | 1-2 周 | 每线程 `core-$tid.img` | [A4](steps/A4-threads.md) |
+| **A4** | 多线程 | 1-2 周 | 每线程 `core-$tid.img` | [A4](steps/A4-threads.md)、[计划](plans/2026-09-15-a4-threads-implementation.md) |
 | **A5** | 文件描述符(pipe → 常规文件 → unix socket) | 2-3 周 | `files.img` / `fdinfo-*.img` | [A5](steps/A5-fds.md) |
 | **A6** | 信号与定时器 | 1-2 周 | `sigacts-*.img` / `timer*.img` | [A6](steps/A6-signals-timers.md) |
 | **A7** | 进程树 + session/pgid | 1-2 周 | 多进程 `pstree.img` | [A7](steps/A7-pstree.md) |
 | **A8** | 共享资源去重 | 1-2 周 | 跨任务共享的 pipe / SHM 只存一份 | [A8](steps/A8-shared-resources.md) |
+| **A9** | 进程执行环境 dump（后置简要规划） | 待定 | 支持矩阵内的 cgroup/namespace/mount/fs 上下文快照 | 待补充 |
+| **A10** | 完整镜像集成与跨场景验证（后置简要规划） | 待定 | 支持/拒绝矩阵、真实 CRIU restore 验证、A 轨发布门禁 | 待补充 |
 
-A 轨合计 **10-17 周**。A3 是**门禁**:A3 不通过,A4-A8 全部无意义。
+A 轨合计工期暂不重新估算。A3 是核心门禁；当前先完成 A4-A8，再详细设计并实现
+A9，最后用 A10 做完整集成验证。B1/B2 只有 A10 通过后才启动。
 
 ### B 轨 —— 用户空间 mini-restore(验证器:真 criu dump 的镜像)
 
@@ -110,7 +113,7 @@ A 轨合计 **10-17 周**。A3 是**门禁**:A3 不通过,A4-A8 全部无意义�
 | **B1** | 单进程 restore(镜像读取 + 地址空间偷换 + `rt_sigreturn`) | 2-3 周 | 能恢复极简进程 | [B1](steps/B1-mini-restore.md) |
 | **B2** | 进程树 restore(两趟 fork + session/pgid) | 2-3 周 | 能恢复多进程树 | [B2](steps/B2-pstree-restore.md) |
 
-B 轨可与 A 轨**任意并行**,只依赖 S0。
+B 轨暂缓，待 A10 通过后再启动。
 
 ### X 轨 —— 只有内核能做的事
 
@@ -128,12 +131,14 @@ S0 ──┬──► A1 ──► A2 ──► A3(门禁)──┬──► A4 
      │                              ├──► A6 ──┤
      │                              └──► A7 ──┘
      │
-     ├──► B1 ──► B2
+     │                                         ▼
+     │                                        A9 ──► A10 ──► B1 ──► B2
      │
      └──► X1(任何时候都能做,不依赖 A/B)
 ```
 
-A4/A5/A6/A7 之间**互不依赖**,可任意顺序、可并行。
+A4/A5/A6/A7 之间**互不依赖**,可任意顺序、可并行；当前优先开始 A4。
+A9/A10 只保留路线占位，详细字段和实现方案在 A8 接近完成时再单独设计。
 建议排序依据:**哪一类能解锁最多 ZDTM 测试就先做**,让「下一步做什么」变成
 可查的问题而不是要猜的问题(方法见 A3 的「排序仪表盘」一节)。
 
