@@ -37,6 +37,15 @@ struct.pack_into('<Q', regs, 256, 0x400120)
 struct.pack_into('<Q', regs, 264, 0x60001000)
 add(4, struct.pack('<I', len(regs)) + regs + struct.pack('<Q', 0x12345000))
 
+def thread(tid, tls, blocked, raw_regs):
+    payload = struct.pack('<4IQQ', tid, 1234, len(raw_regs), 0,
+                          tls, blocked) + raw_regs
+    return payload + b'\0' * (544 - len(payload))
+
+add(10, thread(1234, 0x12345000, 0x11, bytes(regs)))
+add(10, thread(1235, 0x12345001, 0x22, bytes(regs)))
+add(10, thread(1236, 0x12345002, 0x44, bytes(regs)))
+
 creds = struct.pack('<9I', 1000, 1000, 1000, 1000, 1000, 1000,
                     1000, 1000, 0)
 creds += struct.pack('<10I', *( [0, 0] * 5 ))
@@ -89,7 +98,7 @@ raw += struct.pack('<Q I I Q', 0x43524955534e5033, 1, len(records),
 open(out, 'wb').write(raw)
 PY
 "$bin" "$tmp/snapshot.bin" -D "$tmp/images"
-for f in inventory.img pstree.img core-1234.img mm-1234.img pagemap-1234.img files.img fdinfo-1.img fs-1234.img creds-1234.img ids-1234.img reg-files.img; do test -s "$tmp/images/$f" || { echo "missing $f" >&2; exit 1; }; done
+for f in inventory.img pstree.img core-1234.img core-1235.img core-1236.img mm-1234.img pagemap-1234.img files.img fdinfo-1.img fs-1234.img creds-1234.img ids-1234.img reg-files.img; do test -s "$tmp/images/$f" || { echo "missing $f" >&2; exit 1; }; done
 test -e "$tmp/images/pages-1.img"
 python3 - "$tmp/images" <<'PY'
 import pathlib, struct, sys
@@ -159,6 +168,17 @@ assert {1, 3, 4, 5, 8}.issubset(core), core.keys()
 assert {1, 2, 3, 4, 5, 6}.issubset(fields(core[3][0]))
 assert {1, 2, 3, 4}.issubset(fields(core[8][0])), fields(core[8][0]).keys()
 assert fields(core[8][0])[2][0] == 0x12345000
+
+for tid, tls, blocked in ((1234, 0x12345000, 0x11),
+                          (1235, 0x12345001, 0x22),
+                          (1236, 0x12345002, 0x44)):
+    thread_core = fields(messages(f'core-{tid}.img', 8)[0])
+    assert 5 in thread_core and 8 in thread_core
+    assert fields(thread_core[5][0])[6][0] == blocked
+    assert fields(thread_core[8][0])[2][0] == tls
+
+pstree = fields(messages('pstree.img', 8)[0])
+assert set(pstree[5]) == {1234, 1235, 1236}
 
 mm = fields(messages('mm-1234.img', 8)[0])
 assert 12 in mm and len(mm[14]) == 3, mm.keys()

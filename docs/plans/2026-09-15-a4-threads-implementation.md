@@ -178,6 +178,17 @@ limactl shell criu-dev bash -lc \
 
 ## Deferred work
 
+## Implementation status (2026-09-15)
+
+- Tasks 1-5 complete: contract, versioned `THREAD` TLV, RCU pinning, per-thread
+  registers/TLS/blocked mask, per-thread core images and exact pstree thread list.
+- Task 6 core gate complete: `tests/a4-cross-restore.sh` returned
+  `A4_CROSS_RESTORE: PASS` in Lima + nested Linux 5.10.29 QEMU.
+- A3 single-thread gate returned `A3_CROSS_RESTORE: PASS` after the ABI change.
+- Signal disposition/pending/timer and pthread join/mutex semantics remain deferred;
+  they are not silently represented by the A4 converter.
+- Task 7 documentation is updated here; ZDTM allowlist remains unchanged.
+
 - A9 detailed cgroup/namespace/mount/fs-context design.
 - A10 complete support/拒绝 matrix and release gate.
 - B1/B2 user-space restore.

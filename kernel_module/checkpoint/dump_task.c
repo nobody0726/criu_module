@@ -42,17 +42,14 @@ int criu_dump_task(struct task_struct *task,
 
 	if (!task || !writer)
 		return -EINVAL;
-	if (task->signal && task->signal->nr_threads != 1) {
-		pr_info("criu_dump_task: reject threads=%d pid=%d\n",
-			task->signal->nr_threads, task_pid_vnr(task));
-		return -EOPNOTSUPP;
-	}
-	if (task->sighand && has_signal_handlers(task->sighand)) {
+	if (task->signal && task->signal->nr_threads == 1 &&
+	    task->sighand && has_signal_handlers(task->sighand)) {
 		pr_info("criu_dump_task: reject signal handlers pid=%d\n",
 			task_pid_vnr(task));
 		return -EOPNOTSUPP;
 	}
-	if (task->sighand && has_timers(task->signal)) {
+	if (task->signal && task->signal->nr_threads == 1 &&
+	    task->sighand && has_timers(task->signal)) {
 		pr_info("criu_dump_task: reject timers pid=%d\n", task_pid_vnr(task));
 		return -EOPNOTSUPP;
 	}

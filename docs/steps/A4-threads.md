@@ -176,6 +176,16 @@ CRIU 的对应镜像是 `signal-$pid.img`(共享队列)和 `psigfd-$tid.img` 之
 
 ## 5. 如何测试
 
+当前实现的权威入口是 `tests/a4-cross-restore.sh`。它在 Lima 编译后通过
+`scripts/run-qemu.sh --ci` 启动 Linux 5.10.29 guest，冻结并 dump 一个 leader 加
+八个 worker，检查 9 个 `core-$tid.img` 与 `pstree.img.threads`，随后调用真实
+`criu restore`。2026-09-15 新鲜输出为 `A4_CROSS_RESTORE: PASS`。
+
+本阶段只验证线程枚举、TID、寄存器/TLS、blocked mask 和 core/pstree 集合。多线程
+进程的 signal disposition、pending queue、POSIX timer、clear-child-tid/mutex
+语义仍属于 A6/A8；为了让 pthread fixture 可 dump，内核只在多线程路径暂不因共享
+signal handler/timer 拒绝，但 converter 不伪造这些语义，不能将此视为已实现。
+
 ### 5.1 目标程序
 
 ```c
@@ -298,7 +308,7 @@ zdtm/static/tls01
 ## 6. 完成标准
 
 - [ ] 11 个用例通过,含 10、11 两个难点
-- [ ] A3 的所有测试仍然通过(单线程回归)
-- [ ] 回去确认 A2 的 `criu_freeze_settled` 覆盖所有线程,而非只看 leader
-- [ ] `criu_walk_threads` 的「回调在 RCU 下、不可睡眠」约束写进头文件注释
-- [ ] allowlist 增加至少 3 个 pthread/tls 测试
+- [x] A3 的所有测试仍然通过(单线程回归)
+- [x] A2 的 settled 判定覆盖完整 thread group
+- [x] 线程枚举采用 RCU 内 pin、RCU 外 I/O，约束写入 `dump_threads.h`
+- [ ] allowlist 增加至少 3 个 pthread/tls 测试（待 A6 signal 语义完成后）
