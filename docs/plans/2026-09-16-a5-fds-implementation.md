@@ -2,75 +2,166 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Extend the frozen kernel dump and converter with deduplicated regular-file fd records and explicit unsupported handling for pipe/socket state.
+**Goal:** 完成 regular file、pipe 和已连接 UNIX stream socket 的内核 dump、CRIU 镜像转换及 Linux 5.10.29 guest restore 验证。
 
-**Architecture:** Keep the snapshot TLV ABI little-endian and backward-readable. The kernel snapshots and pins every fd before sleeping, maps `struct file *` pointers to object IDs, and emits one extended FD record per descriptor. The userspace converter builds one CRIU file entry per object and one fdinfo entry per descriptor, while rejecting unsupported object types before emitting images.
+**Architecture:** 保留 560/576-byte FD ABI，新增 type-specific pipe/socket snapshot records。内核在冻结后先 pin fd，再在锁外只读采集对象状态；converter 先构建并校验完整对象图，再生成 `files.img`、`pipes-data.img`、`unixsk.img` 和 `sk-queues.img`。恢复交给真实 CRIU，测试验证共享关系和数据行为。
 
-**Tech Stack:** Linux 5.10.29 kernel module, C11 userspace converter, shell/Python contract fixtures, CRIU image protobuf wire format, Lima plus nested QEMU for the authoritative gate.
+**Tech Stack:** Linux 5.10.29/aarch64 kernel module, C11 converter, CRIU protobuf-c images, Lima `criu-dev`, nested QEMU guest, shell/C fixtures.
 
 ---
 
-### Task 1: Add the failing A5 contract test
+## 执行约束
 
-**Files:** Create `tests/a5-fd-contract.sh`.
+- 代码和 Git 操作在 macOS A5 worktree；Linux userspace build 在 Lima `criu-dev`；模块加载、目标内核行为和真实 restore 只在嵌套 Linux 5.10.29 guest。
+- dump、snapshot、CRIU images 和日志使用 guest-local `/tmp`，不得把 Lima 9p 根目录权限问题当成实现失败。
+- 每个阶段先有失败 contract/fixture，再实现最小代码；每项完成后单独提交。
+- 任何 unsupported 类型都必须在 dump 或 converter 阶段明确失败，并清理临时输出；不得留下可被 restore 误读的部分镜像。
+- guest 缺少 `criu` binary 时，只报告 snapshot/converter gate，不报告 cross-restore PASS。
+- 参考 `docs/A3-问题与解决方法复盘.md`，不修改未相关的 A3/A4 行为和生成 artifacts。
 
-1. Assert the extended FD ABI constants/fields, objmap declarations, flag sanitization, and type dispatch are present.
-2. Assert fd-table callbacks do not perform image I/O while holding `file_lock` or an RCU read-side section.
-3. Assert converter checks the extended record size and emits object-id based fdinfo.
-4. Run `sh tests/a5-fd-contract.sh`; expect failure because the new symbols do not yet exist.
-5. Commit the test.
+## Task 1: 扩展 snapshot ABI 和模型
 
-### Task 2: Extend the snapshot FD ABI and converter model
+**Files:**
+- Modify: `include/criu_snapshot.h`
+- Modify: `kernel_module/checkpoint/dump_files.h`
+- Modify: `userspace/criu-module-convert/criu_model.c`
+- Create: `tests/a5-object-record-contract.sh`
 
-**Files:** Modify `include/criu_snapshot.h`, `kernel_module/checkpoint/dump_files.h`, `userspace/criu-module-convert/criu_model.c`.
+1. 写失败 contract，要求新增 pipe endpoint、pipe data、UNIX socket 和 socket queue record 常量、固定 packed size、type/object references。
+2. 运行 `sh tests/a5-object-record-contract.sh`，确认在实现前失败。
+3. 为 snapshot 增加版本化的 type-specific records；保留旧记录可读，所有整数继续 little-endian packed ABI。
+4. converter 解析新记录但只构建内存对象表，不立即写镜像；检测短记录、重复 ID、类型冲突和越界长度。
+5. 运行 `sh tests/a5-object-record-contract.sh tests/a5-fd-contract.sh`，预期 PASS。
+6. 提交：`git commit -m 'feat: extend A5 fd object snapshot ABI'`。
 
-1. Append `object_id`, `type`, and `object_flags` after the existing 512-byte path so old 560-byte records remain readable.
-2. Define `CRIU_SNAPSHOT_FD_RECORD_SIZE`, `CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE`, and regular/pipe/unix type values.
-3. Parse both record sizes; reject short records, duplicate fd numbers, conflicting object metadata, and unsupported types before image emission.
-4. Sanitize `O_CREAT|O_EXCL|O_TRUNC` when building `reg_file_entry`.
-5. Use object IDs for file-table deduplication; never merge two records solely by path when a nonzero object ID is present.
-6. Run `tests/a5-fd-contract.sh` and `tests/converter-images.sh`; commit.
+## Task 2: 增加失败 fixture 和对象图校验
 
-### Task 3: Implement the kernel object map and safe fd snapshot
+**Files:**
+- Modify: `tests/a5-converter-fds.sh`
+- Create: `tests/progs/fds-pipe.c`
+- Create: `tests/progs/fds-unix-stream.c`
+- Modify: `tests/progs/Makefile`
 
-**Files:** Create `kernel_module/core/objmap.c`, `kernel_module/core/objmap.h`, modify `kernel_module/Makefile`, `kernel_module/checkpoint/dump_files.c`.
+1. 为 converter 增加 malformed fixtures：pipe 两端 ID 冲突、socket peer 不对称、queue raw length 错误、ancillary/SCM_RIGHTS 标记和 unsupported socket type。
+2. 运行 `sh tests/a5-converter-fds.sh`，确认新增用例先失败。
+3. 创建 pipe fixture：保留读端和写端、填入普通未读字节、覆盖 empty pipe 和写端关闭状态。
+4. 创建 UNIX stream fixture：`socketpair(AF_UNIX, SOCK_STREAM)`，写入双向未读字节，覆盖 shutdown。
+5. converter 先完整校验对象图，再写临时 image directory；失败删除目录。
+6. 运行 `sh tests/a5-converter-fds.sh` 和 fixture 的静态构建；提交：`git commit -m 'test: add A5 pipe and unix stream fixtures'`。
 
-1. Implement a mutex-protected pointer-to-u32 map with `is_new`, deterministic IDs, and full cleanup.
-2. Snapshot `files_struct` entries under `file_lock`, pin each file with `get_file`, release locks, then invoke the callback.
-3. Classify regular files, FIFO/pipe, and sockets from inode mode/socket state without relying on unexported `pipefifo_fops`.
-4. Emit extended records, clean open flags, and reject deleted paths or unsupported types before writing any record.
-5. Release every file and map allocation on all error paths.
-6. Run the module build in Lima against Linux 5.10.29; commit.
+## Task 3: 实现 pipe 内核采集
 
-### Task 4: Add userspace FD fixtures and image assertions
+**Files:**
+- Create: `kernel_module/checkpoint/dump_pipe.c`
+- Create: `kernel_module/checkpoint/dump_pipe.h`
+- Modify: `kernel_module/checkpoint/dump_files.c`
+- Modify: `kernel_module/Makefile`
+- Modify: `tests/a5-fd-contract.sh`
 
-**Files:** Create `tests/progs/fds-dup.c`, modify `tests/progs/Makefile`, create `tests/a5-converter-fds.sh`.
+1. 在 contract 中锁定 Linux 5.10.29 的 pipe 结构访问、endpoint direction、pipe_id、head/tail 只读要求和不支持 buffer 类型错误路径。
+2. 运行 contract，确认未实现时失败。
+3. 按 inode/pipe object 建立 pipe_id，不能按 endpoint `struct file *` 合并；持有 pipe/file 引用直到 record 写完。
+4. 在 pipe 内部锁保护下复制有效 ring buffer，不能推进 head/tail，不能调用 `read()`/`tee()`；记录容量、bytes、方向和 write-end closed 状态。
+5. 对 packetized/无法安全复制的 buffer 返回 `-EOPNOTSUPP`，释放所有引用并 abort snapshot。
+6. 在 Lima 中构建 Linux module；只在 QEMU guest 中执行 insmod/dump。
+7. 运行 `sh tests/a5-fd-contract.sh`；提交：`git commit -m 'feat: dump pipe endpoints and data'`。
 
-1. Build a fixture containing two independent opens, one dup pair, a high-numbered fd, and a pipe marker.
-2. Generate an extended snapshot fixture with object IDs and sanitized truncation flags.
-3. Assert `files.img` has one object entry for each object ID, `fdinfo-1.img` preserves exact fd numbers and shared IDs, and converter rejects pipe/socket records without creating an image directory.
-4. Run the fixture and converter tests; commit.
+## Task 4: 实现 UNIX stream 内核采集
 
-### Task 5: Guest gate and regressions
+**Files:**
+- Create: `kernel_module/checkpoint/dump_unixsk.c`
+- Create: `kernel_module/checkpoint/dump_unixsk.h`
+- Modify: `kernel_module/checkpoint/dump_files.c`
+- Modify: `kernel_module/Makefile`
+- Modify: `tests/a5-fd-contract.sh`
 
-**Files:** Create `tests/a5-cross-restore.sh`, modify `docs/steps/A5-fds.md`, `docs/03-Iteration-Plan.md` only for verified status.
+1. 增加失败 contract：listener/pathname/dgram/seqpacket/external peer/ancillary data 必须返回 unsupported。
+2. 运行 contract，确认未实现时失败。
+3. 识别 `AF_UNIX/SOCK_STREAM` 已连接 socket，记录 socket object、peer object、state、flags、shutdown 和必要 options。
+4. 在 socket 锁保护下只读复制普通 receive queue；检测 ancillary data，尤其 `SCM_RIGHTS`，立即失败，不消费队列。
+5. 验证 peer 关系对称；任何缺失或 dangling peer 返回 `-EOPNOTSUPP`。
+6. 在 Lima 构建并在 Linux 5.10.29 guest 中验证 dump；提交：`git commit -m 'feat: dump connected unix stream sockets'`。
 
-1. Build the static fixture and module in Lima; run module load/dump only inside nested Linux 5.10.29 QEMU.
-2. Verify extended records, object-id deduplication, regular file flags/position, and explicit unsupported return for pipe/socket.
-3. Run A3 and A4 gates plus `make -C userspace`, shell syntax, and `git diff --check`.
-4. Record fresh guest output and the exact unsupported matrix; do not add unverified ZDTM allowlist entries.
-5. Commit documentation and final implementation.
+## Task 5: 生成 CRIU pipe/socket images
 
-## Verification commands
+**Files:**
+- Modify: `userspace/criu-module-convert/criu_model.c`
+- Modify: `userspace/criu-module-convert/image_writer.c`
+- Modify: `tests/a5-converter-fds.sh`
+- Create: `tests/a5-images.sh`
+
+1. 为 `files.img` 增加 PIPE/UNIXSK tagged entries；为 pipe 生成 `pipes-data.img`，为 UNIX queue 生成 `unixsk.img` 与 `sk-queues.img`，并保留 `fdinfo` 的 exact fd/object mapping。
+2. 使用 CRIU protobuf wire layout，参考 `criu/images/pipe.proto`, `pipe-data.proto`, `sk-unix.proto`, `sk-queue` 相关实现；不得自定义无法被 CRIU 读取的字段。
+3. 对每个 object 只生成一次描述；校验 pipe_id、peer、raw data 长度、n_scm==0 和 fd flags。
+4. 先写临时目录，所有 images 成功后原子 rename；失败删除临时目录。
+5. `tests/a5-images.sh` 解析 image magic 和 protobuf 字段，验证没有重复对象或残留半成品。
+6. 在 Lima 构建 converter，运行 `sh tests/a5-converter-fds.sh tests/a5-images.sh`；提交：`git commit -m 'feat: emit CRIU pipe and unix stream images'`。
+
+## Task 6: 用户态行为 fixtures 和 converter gate
+
+**Files:**
+- Modify: `tests/progs/fds-pipe.c`
+- Modify: `tests/progs/fds-unix-stream.c`
+- Create: `tests/a5-behavior.sh`
+- Modify: `tests/a5-converter-fds.sh`
+
+1. 为 regular file 验证 independent open 与 dup 的 f_pos 关系。
+2. 为 pipe 验证内容字节、两端关联、empty pipe 和写端关闭后的 EOF。
+3. 为 UNIX stream 验证 socketpair 双向通信、未读数据、shutdown 和 peer 关系。
+4. 为 unsupported cases 验证 listener、pathname-bound、datagram、SCM_RIGHTS、FIFO 明确失败。
+5. converter gate 只接受完整对象图；运行 `sh tests/a5-behavior.sh` 和全部 A5 converter tests。
+6. 提交：`git commit -m 'test: verify A5 fd restore semantics'`。
+
+## Task 7: Linux 5.10.29 guest gate
+
+**Files:**
+- Create: `tests/a5-cross-restore.sh`
+- Modify: `docs/steps/A5-fds.md`
+- Modify: `docs/03-Iteration-Plan.md`
+
+1. 在 Lima 构建 userspace、fixtures 和 module：
+
+```sh
+limactl shell criu-dev bash -lc \
+  'cd /Users/yhome/.codex/worktrees/56c1/criu_module && \
+   make -C userspace && make -C tests/progs fds-dup fds-pipe fds-unix-stream'
+```
+
+2. 用 `scripts/run-qemu.sh` 将必要文件 staging 到 guest-local `/tmp`，只在 guest 执行 module load、dump 和 restore。
+3. 运行：
+
+```sh
+limactl shell criu-dev bash -lc \
+  'cd /Users/yhome/.codex/worktrees/56c1/criu_module && \
+   ./scripts/run-qemu.sh --ci --script tests/a5-cross-restore.sh'
+```
+
+4. 只有输出同时包含 regular/pipe/UNIX behavior PASS 且 restore 进程存活并继续通信，才记录 `A5_CROSS_RESTORE: PASS`。
+5. 如果 guest 没有可用 CRIU，记录 `A5_FD_GUEST: PASS (dump/converter gate; CRIU unavailable)`，并明确 cross-restore 未验证。
+6. 检查 guest-local dmesg，确认没有 module warning/oops；不把 Lima host kernel 输出计入目标验证。
+7. 提交文档和 gate：`git commit -m 'test: add A5 Linux 5.10.29 guest gate'`。
+
+## Task 8: 回归与发布前检查
+
+**Files:**
+- No generated artifacts or logs committed.
+
+1. 在 macOS 运行：
 
 ```sh
 sh tests/a5-fd-contract.sh
 sh tests/a5-converter-fds.sh
-make -C userspace
-sh tests/converter-format.sh
-sh tests/converter-images.sh
+sh tests/a5-images.sh
+sh tests/a5-behavior.sh
 sh -n tests/a5-*.sh
 git diff --check
-limactl shell criu-dev bash -lc 'cd /Users/yhome/workspace/source_code/criu_module && ./scripts/run-qemu.sh --ci --script tests/a5-cross-restore.sh'
-limactl shell criu-dev bash -lc 'cd /Users/yhome/workspace/source_code/criu_module && ./scripts/run-qemu.sh --ci --script tests/ci-smoke.sh'
 ```
+
+2. 在 Lima 运行 `make -C userspace` 和所有静态 fixture build。
+3. 在 guest 运行 A3/A4 gates，确认 A5 没有改变已有行为。
+4. 运行 `git status --short`，清除测试生成的 `tests/progs/fds-dup`、`fds-pipe`、`fds-unix-stream`，不要提交 `artifacts/`、logs 或 binaries。
+5. 使用 `git diff main...HEAD` 审查 ABI、错误清理和环境声明；提交：`git commit -m 'test: complete A5 regression gates'`。
+
+## 完成判定
+
+A5 仅在 Task 1-8 全部完成、真实 guest CRIU restore 行为通过、A3/A4 回归通过且所有延期能力已在文档备忘中列明时发布。缺少 guest CRIU、只通过 converter、或只在 macOS/Lima host kernel 通过，都不能称为 A5 完成。
