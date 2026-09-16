@@ -40,7 +40,7 @@ static uint32_t le32(const uint8_t *p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(
 static uint64_t le64(const uint8_t *p){return (uint64_t)le32(p)|(uint64_t)le32(p+4)<<32;}
 static int known_type(uint16_t t)
 {
-	return t >= CRIU_SNAPSHOT_REC_TASK && t <= CRIU_SNAPSHOT_REC_THREAD;
+	return t >= CRIU_SNAPSHOT_REC_TASK && t <= CRIU_SNAPSHOT_REC_SOCKET_QUEUE;
 }
 
 int snapshot_read_validate(const char *path, struct snapshot_document *doc)

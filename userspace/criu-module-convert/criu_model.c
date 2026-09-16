@@ -103,6 +103,10 @@ struct snapshot_model {
 	struct blob_list fds;
 	struct blob_list pages;
 	struct blob_list threads;
+	struct blob_list pipe_endpoints;
+	struct blob_list pipe_data;
+	struct blob_list unix_sockets;
+	struct blob_list socket_queues;
 	uint32_t arch;
 	uint32_t page_size;
 	uint32_t pid;
@@ -140,6 +144,32 @@ struct file_table {
 	uint32_t root_id;
 };
 
+struct fd_object_ref {
+	uint64_t object_id;
+	uint32_t type;
+	bool has_definition;
+};
+
+struct pipe_object_ref {
+	uint64_t pipe_id;
+};
+
+struct queue_object_ref {
+	uint64_t object_id;
+};
+
+struct fd_object_table {
+	struct fd_object_ref *objects;
+	size_t object_count;
+	size_t object_capacity;
+	struct pipe_object_ref *pipes;
+	size_t pipe_count;
+	size_t pipe_capacity;
+	struct queue_object_ref *queues;
+	size_t queue_count;
+	size_t queue_capacity;
+};
+
 static uint16_t u16(const uint8_t *p)
 {
 	return (uint16_t)p[0] | (uint16_t)p[1] << 8;
@@ -172,6 +202,10 @@ static void model_free(struct snapshot_model *model)
 	free(model->fds.items);
 	free(model->pages.items);
 	free(model->threads.items);
+	free(model->pipe_endpoints.items);
+	free(model->pipe_data.items);
+	free(model->unix_sockets.items);
+	free(model->socket_queues.items);
 	memset(model, 0, sizeof(*model));
 }
 
@@ -278,6 +312,22 @@ static int collect_records(const struct snapshot_document *doc,
 			if (list_add(&model->threads, payload, len))
 				goto io_error;
 			break;
+		case CRIU_SNAPSHOT_REC_PIPE_ENDPOINT:
+			if (list_add(&model->pipe_endpoints, payload, len))
+				goto io_error;
+			break;
+		case CRIU_SNAPSHOT_REC_PIPE_DATA:
+			if (list_add(&model->pipe_data, payload, len))
+				goto io_error;
+			break;
+		case CRIU_SNAPSHOT_REC_UNIX_SOCKET:
+			if (list_add(&model->unix_sockets, payload, len))
+				goto io_error;
+			break;
+		case CRIU_SNAPSHOT_REC_SOCKET_QUEUE:
+			if (list_add(&model->socket_queues, payload, len))
+				goto io_error;
+			break;
 		default:
 			/* snapshot_read_validate() handled mandatory unknown records. */
 			break;
@@ -292,6 +342,211 @@ io_error:
 format_error:
 	model_free(model);
 	return SNAPSHOT_READER_FORMAT_ERROR;
+}
+
+static void fd_object_table_free(struct fd_object_table *table)
+{
+	if (!table)
+		return;
+	free(table->objects);
+	free(table->pipes);
+	free(table->queues);
+	memset(table, 0, sizeof(*table));
+}
+
+static int fd_object_ref_add(struct fd_object_table *table, uint64_t object_id,
+				 uint32_t type, bool definition)
+{
+	struct fd_object_ref *items;
+	size_t capacity;
+	size_t i;
+
+	if (!object_id || (type != CRIU_FD_TYPE_REG &&
+		type != CRIU_FD_TYPE_PIPE && type != CRIU_FD_TYPE_UNIX))
+		return SNAPSHOT_READER_FORMAT_ERROR;
+	for (i = 0; i < table->object_count; i++) {
+		if (table->objects[i].object_id != object_id)
+			continue;
+		if (table->objects[i].type != type ||
+			(definition && table->objects[i].has_definition))
+			return SNAPSHOT_READER_FORMAT_ERROR;
+		if (definition)
+			table->objects[i].has_definition = true;
+		return 0;
+	}
+	if (table->object_count == table->object_capacity) {
+		capacity = table->object_capacity ? table->object_capacity * 2U : 8U;
+		if (capacity < table->object_capacity ||
+			capacity > SIZE_MAX / sizeof(*items))
+			return SNAPSHOT_READER_IO_ERROR;
+		items = realloc(table->objects, capacity * sizeof(*items));
+		if (!items)
+			return SNAPSHOT_READER_IO_ERROR;
+		table->objects = items;
+		table->object_capacity = capacity;
+	}
+	table->objects[table->object_count].object_id = object_id;
+	table->objects[table->object_count].type = type;
+	table->objects[table->object_count].has_definition = definition;
+	table->object_count++;
+	return 0;
+}
+
+static int pipe_object_ref_add(struct fd_object_table *table, uint64_t pipe_id)
+{
+	struct pipe_object_ref *items;
+	size_t capacity;
+	size_t i;
+
+	if (!pipe_id)
+		return SNAPSHOT_READER_FORMAT_ERROR;
+	for (i = 0; i < table->pipe_count; i++)
+		if (table->pipes[i].pipe_id == pipe_id)
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	if (table->pipe_count == table->pipe_capacity) {
+		capacity = table->pipe_capacity ? table->pipe_capacity * 2U : 4U;
+		if (capacity < table->pipe_capacity ||
+			capacity > SIZE_MAX / sizeof(*items))
+			return SNAPSHOT_READER_IO_ERROR;
+		items = realloc(table->pipes, capacity * sizeof(*items));
+		if (!items)
+			return SNAPSHOT_READER_IO_ERROR;
+		table->pipes = items;
+		table->pipe_capacity = capacity;
+	}
+	table->pipes[table->pipe_count++].pipe_id = pipe_id;
+	return 0;
+}
+
+static int queue_object_ref_add(struct fd_object_table *table,
+				 uint64_t object_id)
+{
+	struct queue_object_ref *items;
+	size_t capacity;
+	size_t i;
+
+	if (!object_id)
+		return SNAPSHOT_READER_FORMAT_ERROR;
+	for (i = 0; i < table->queue_count; i++)
+		if (table->queues[i].object_id == object_id)
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	if (table->queue_count == table->queue_capacity) {
+		capacity = table->queue_capacity ? table->queue_capacity * 2U : 4U;
+		if (capacity < table->queue_capacity ||
+			capacity > SIZE_MAX / sizeof(*items))
+			return SNAPSHOT_READER_IO_ERROR;
+		items = realloc(table->queues, capacity * sizeof(*items));
+		if (!items)
+			return SNAPSHOT_READER_IO_ERROR;
+		table->queues = items;
+		table->queue_capacity = capacity;
+	}
+	table->queues[table->queue_count++].object_id = object_id;
+	return 0;
+}
+
+static int build_fd_object_table(const struct snapshot_model *model,
+				 struct fd_object_table *table)
+{
+	size_t i;
+	int ret;
+
+	memset(table, 0, sizeof(*table));
+	for (i = 0; i < model->fds.count; i++) {
+		const struct blob_ref *blob = &model->fds.items[i];
+		uint64_t object_id;
+		uint32_t type;
+
+		if (blob->len < CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE)
+			continue;
+		object_id = u64(blob->data + FD_OBJECT_ID_OFFSET);
+		type = u32(blob->data + FD_TYPE_OFFSET);
+		ret = fd_object_ref_add(table, object_id, type, false);
+		if (ret)
+			goto error;
+	}
+	for (i = 0; i < model->pipe_endpoints.count; i++) {
+		const struct blob_ref *blob = &model->pipe_endpoints.items[i];
+		const uint8_t *record = blob->data;
+
+		if (blob->len != CRIU_SNAPSHOT_PIPE_ENDPOINT_RECORD_SIZE ||
+			u32(record) != CRIU_SNAPSHOT_PIPE_ENDPOINT_VERSION ||
+			u32(record + 28) != 0 ||
+			(u32(record + 24) != CRIU_PIPE_DIRECTION_READ &&
+			 u32(record + 24) != CRIU_PIPE_DIRECTION_WRITE)) {
+			ret = SNAPSHOT_READER_FORMAT_ERROR;
+			goto error;
+		}
+		ret = fd_object_ref_add(table, u64(record + 8),
+					CRIU_FD_TYPE_PIPE, true);
+		if (ret)
+			goto error;
+		if (!u64(record + 16)) {
+			ret = SNAPSHOT_READER_FORMAT_ERROR;
+			goto error;
+		}
+	}
+	for (i = 0; i < model->pipe_data.count; i++) {
+		const struct blob_ref *blob = &model->pipe_data.items[i];
+		const uint8_t *record = blob->data;
+		uint32_t data_len;
+
+		if (blob->len < CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE ||
+			u32(record) != CRIU_SNAPSHOT_PIPE_DATA_VERSION ||
+			u32(record + 28) != 0) {
+			ret = SNAPSHOT_READER_FORMAT_ERROR;
+			goto error;
+		}
+		data_len = u32(record + 24);
+		if (data_len != blob->len - CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE ||
+			u64(record + 16) < data_len) {
+			ret = SNAPSHOT_READER_FORMAT_ERROR;
+			goto error;
+		}
+		ret = pipe_object_ref_add(table, u64(record + 8));
+		if (ret)
+			goto error;
+	}
+	for (i = 0; i < model->unix_sockets.count; i++) {
+		const struct blob_ref *blob = &model->unix_sockets.items[i];
+		const uint8_t *record = blob->data;
+
+		if (blob->len != CRIU_SNAPSHOT_UNIX_SOCKET_RECORD_SIZE ||
+			u32(record) != CRIU_SNAPSHOT_UNIX_SOCKET_VERSION ||
+			!u64(record + 16)) {
+			ret = SNAPSHOT_READER_FORMAT_ERROR;
+			goto error;
+		}
+		ret = fd_object_ref_add(table, u64(record + 8),
+					CRIU_FD_TYPE_UNIX, true);
+		if (ret)
+			goto error;
+	}
+	for (i = 0; i < model->socket_queues.count; i++) {
+		const struct blob_ref *blob = &model->socket_queues.items[i];
+		const uint8_t *record = blob->data;
+		uint32_t data_len;
+
+		if (blob->len < CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE ||
+			u32(record) != CRIU_SNAPSHOT_SOCKET_QUEUE_VERSION ||
+			u64(record + 24) != 0) {
+			ret = SNAPSHOT_READER_FORMAT_ERROR;
+			goto error;
+		}
+		data_len = u32(record + 16);
+		if (data_len != blob->len - CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE) {
+			ret = SNAPSHOT_READER_FORMAT_ERROR;
+			goto error;
+		}
+		ret = queue_object_ref_add(table, u64(record + 8));
+		if (ret)
+			goto error;
+	}
+	return 0;
+
+error:
+	fd_object_table_free(table);
+	return ret;
 }
 
 static size_t bounded_string_len(const uint8_t *data, size_t capacity)
@@ -415,9 +670,11 @@ static int validate_model(const struct snapshot_model *model)
 		fdno = u32(fd);
 		if (model->fds.items[i].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE)
 			type = u32(fd + FD_TYPE_OFFSET);
-		if (type != CRIU_FD_TYPE_REG)
+		if (type != CRIU_FD_TYPE_REG && type != CRIU_FD_TYPE_PIPE &&
+			type != CRIU_FD_TYPE_UNIX)
 			return SNAPSHOT_READER_UNSUPPORTED;
-		if (copy_fixed_string(path, sizeof(path), fd + 48, 512))
+		if (type == CRIU_FD_TYPE_REG &&
+			copy_fixed_string(path, sizeof(path), fd + 48, 512))
 			return SNAPSHOT_READER_FORMAT_ERROR;
 		if (fdno >= 1024U)
 			return SNAPSHOT_READER_UNSUPPORTED;
@@ -1456,6 +1713,7 @@ int criu_emit_images(const struct snapshot_document *doc,
 			 const struct criu_convert_options *options)
 {
 	struct snapshot_model model;
+	struct fd_object_table fd_objects;
 	struct file_table files;
 	struct image_writer message;
 	struct image_writer *file_messages = NULL;
@@ -1477,10 +1735,17 @@ int criu_emit_images(const struct snapshot_document *doc,
 		fprintf(stderr, "converter: collect_records rc=%d\n", ret);
 		return ret;
 	}
+	ret = build_fd_object_table(&model, &fd_objects);
+	if (ret) {
+		fprintf(stderr, "converter: build_fd_object_table rc=%d\n", ret);
+		model_free(&model);
+		return ret;
+	}
 	ret = validate_model(&model);
 	if (ret || !model.task.data) {
 		if (ret)
 			fprintf(stderr, "converter: validate_model rc=%d\n", ret);
+		fd_object_table_free(&fd_objects);
 		model_free(&model);
 		return ret;
 	}
@@ -1489,12 +1754,24 @@ int criu_emit_images(const struct snapshot_document *doc,
 	if (!model.mm.data && !model.regs.data && !model.fs.data &&
 	    !model.creds.data && !model.fds.count && !model.vmas.count &&
 	    !model.pages.count) {
+		fd_object_table_free(&fd_objects);
 		model_free(&model);
 		return 0;
+	}
+	for (i = 0; i < model.fds.count; i++) {
+		const struct blob_ref *fd = &model.fds.items[i];
+
+		if (fd->len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE &&
+			u32(fd->data + FD_TYPE_OFFSET) != CRIU_FD_TYPE_REG) {
+			fd_object_table_free(&fd_objects);
+			model_free(&model);
+			return SNAPSHOT_READER_UNSUPPORTED;
+		}
 	}
 	ret = build_file_table(&model, &files);
 	if (ret) {
 		fprintf(stderr, "converter: build_file_table rc=%d\n", ret);
+		fd_object_table_free(&fd_objects);
 		model_free(&model);
 		return ret;
 	}
@@ -1682,6 +1959,7 @@ out_message:
 	free(page_data);
 out:
 	file_table_free(&files);
+	fd_object_table_free(&fd_objects);
 	model_free(&model);
 	return ret;
 }

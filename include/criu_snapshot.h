@@ -30,6 +30,14 @@ typedef __u64 uint64_t;
 #define CRIU_SNAPSHOT_THREAD_REG_BYTES 512U
 #define CRIU_SNAPSHOT_FD_RECORD_SIZE 560U
 #define CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE 576U
+#define CRIU_SNAPSHOT_PIPE_ENDPOINT_RECORD_SIZE 32U
+#define CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE 32U
+#define CRIU_SNAPSHOT_UNIX_SOCKET_RECORD_SIZE 48U
+#define CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE 32U
+#define CRIU_SNAPSHOT_PIPE_ENDPOINT_VERSION 1U
+#define CRIU_SNAPSHOT_PIPE_DATA_VERSION 1U
+#define CRIU_SNAPSHOT_UNIX_SOCKET_VERSION 1U
+#define CRIU_SNAPSHOT_SOCKET_QUEUE_VERSION 1U
 #define CRIU_SNAPSHOT_HEADER_FLAGS 0U
 #define CRIU_SNAPSHOT_TLV_FLAGS 0U
 #define CRIU_SNAPSHOT_FOOTER_FLAGS 0U
@@ -50,6 +58,10 @@ enum criu_snapshot_record_type {
 	CRIU_SNAPSHOT_REC_IDMAP = 8,
 	CRIU_SNAPSHOT_REC_PAGE_RUN = 9,
 	CRIU_SNAPSHOT_REC_THREAD = 10,
+	CRIU_SNAPSHOT_REC_PIPE_ENDPOINT = 11,
+	CRIU_SNAPSHOT_REC_PIPE_DATA = 12,
+	CRIU_SNAPSHOT_REC_UNIX_SOCKET = 13,
+	CRIU_SNAPSHOT_REC_SOCKET_QUEUE = 14,
 	CRIU_SNAPSHOT_REC_END = 0xffff,
 };
 
@@ -66,6 +78,15 @@ enum criu_snapshot_fd_type {
 	CRIU_FD_TYPE_PIPE = 2,
 	CRIU_FD_TYPE_UNIX = 3,
 	CRIU_FD_TYPE_FIFO = 4,
+};
+
+enum criu_snapshot_pipe_direction {
+	CRIU_PIPE_DIRECTION_READ = 1,
+	CRIU_PIPE_DIRECTION_WRITE = 2,
+};
+
+enum criu_snapshot_pipe_flags {
+	CRIU_PIPE_FLAG_WRITE_CLOSED = 1U << 0,
 };
 
 /* Packed sizes are part of the ABI; do not use these as kernel structs. */
@@ -125,16 +146,67 @@ struct criu_snapshot_fd_record {
 	uint32_t object_flags;
 } CRIU_SNAPSHOT_PACKED;
 
+/* Pipe endpoint objects are distinct struct file instances referring to one
+ * shared pipe_id. Pipe bytes follow a fixed pipe-data header in the TLV. */
+struct criu_snapshot_pipe_endpoint_record {
+	uint32_t version;
+	uint32_t flags;
+	uint64_t object_id;
+	uint64_t pipe_id;
+	uint32_t direction;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_pipe_data_record {
+	uint32_t version;
+	uint32_t flags;
+	uint64_t pipe_id;
+	uint64_t capacity;
+	uint32_t data_len;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+/* Only connected AF_UNIX/SOCK_STREAM objects are representable in A5.
+ * Receive-queue bytes follow a fixed socket-queue header in the TLV. */
+struct criu_snapshot_unix_socket_record {
+	uint32_t version;
+	uint32_t flags;
+	uint64_t object_id;
+	uint64_t peer_object_id;
+	uint32_t family;
+	uint32_t socket_type;
+	uint32_t state;
+	uint32_t shutdown;
+	uint64_t options;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_socket_queue_record {
+	uint32_t version;
+	uint32_t flags;
+	uint64_t object_id;
+	uint32_t data_len;
+	uint32_t n_scm;
+	uint64_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
 #if defined(__cplusplus)
 static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
 static_assert(sizeof(struct criu_snapshot_footer) == CRIU_SNAPSHOT_FOOTER_SIZE, "snapshot footer ABI size");
 static_assert(sizeof(struct criu_snapshot_fd_record) == CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE, "snapshot fd ABI size");
+static_assert(sizeof(struct criu_snapshot_pipe_endpoint_record) == CRIU_SNAPSHOT_PIPE_ENDPOINT_RECORD_SIZE, "snapshot pipe endpoint ABI size");
+static_assert(sizeof(struct criu_snapshot_pipe_data_record) == CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE, "snapshot pipe data ABI size");
+static_assert(sizeof(struct criu_snapshot_unix_socket_record) == CRIU_SNAPSHOT_UNIX_SOCKET_RECORD_SIZE, "snapshot unix socket ABI size");
+static_assert(sizeof(struct criu_snapshot_socket_queue_record) == CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE, "snapshot socket queue ABI size");
 #else
 _Static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 _Static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
 _Static_assert(sizeof(struct criu_snapshot_footer) == CRIU_SNAPSHOT_FOOTER_SIZE, "snapshot footer ABI size");
 _Static_assert(sizeof(struct criu_snapshot_fd_record) == CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE, "snapshot fd ABI size");
+_Static_assert(sizeof(struct criu_snapshot_pipe_endpoint_record) == CRIU_SNAPSHOT_PIPE_ENDPOINT_RECORD_SIZE, "snapshot pipe endpoint ABI size");
+_Static_assert(sizeof(struct criu_snapshot_pipe_data_record) == CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE, "snapshot pipe data ABI size");
+_Static_assert(sizeof(struct criu_snapshot_unix_socket_record) == CRIU_SNAPSHOT_UNIX_SOCKET_RECORD_SIZE, "snapshot unix socket ABI size");
+_Static_assert(sizeof(struct criu_snapshot_socket_queue_record) == CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE, "snapshot socket queue ABI size");
 #endif
 
 /* Checksum covers header with checksum field zeroed followed by all TLVs; footer is excluded. */

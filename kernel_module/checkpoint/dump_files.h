@@ -16,6 +16,22 @@ struct criu_fd_record {
 	struct criu_snapshot_fd_record abi;
 } __attribute__((packed));
 
+struct criu_pipe_endpoint_record {
+	struct criu_snapshot_pipe_endpoint_record abi;
+} __attribute__((packed));
+
+struct criu_pipe_data_record {
+	struct criu_snapshot_pipe_data_record abi;
+} __attribute__((packed));
+
+struct criu_unix_socket_record {
+	struct criu_snapshot_unix_socket_record abi;
+} __attribute__((packed));
+
+struct criu_socket_queue_record {
+	struct criu_snapshot_socket_queue_record abi;
+} __attribute__((packed));
+
 int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg);
 
 struct criu_fs_record {
