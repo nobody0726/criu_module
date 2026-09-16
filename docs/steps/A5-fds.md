@@ -1,6 +1,10 @@
 # A5 —— 文件描述符
 
-**工期:** 2-3 周 · **前置:** A3 · **产出:** `files.img` / `fdinfo-*.img`,pipe / 常规文件 / unix socket
+**工期:** 2-3 周 · **前置:** A3 · **产出:** `files.img` / `fdinfo-*.img`、pipe 数据和已连接 UNIX stream socket 镜像
+
+> 设计决议（2026-09-16）：采用方案 2，但 UNIX socket 的 A5 验收范围限定为
+> `AF_UNIX/SOCK_STREAM` 的 `socketpair()`/已连接对和普通未读数据。listener、路径绑定、
+> datagram、`SCM_RIGHTS` 等能力必须明确拒绝并记录为后续任务。
 
 > 相关原理:[07-fd-and-shared-objects](../principles/07-fd-and-shared-objects.md)
 
@@ -386,22 +390,26 @@ zdtm/static/socket-tcp   # 预期失败,A5 不做 TCP
 
 ## 6. 完成标准
 
-- [x] regular-file fd 表、任意 fd 号、dup/object-id 去重和 `O_TRUNC` 清理已实现
-- [x] `criu_objmap` 的 `is_new` 模式由内核 dump 使用，converter 按 object id 生成一次对象条目
-- [x] A3、A4 用户态回归和 Linux 5.10.29 guest dump/converter gate 通过
-- [x] 不支持的能力写进本文件的限制附录，并在 converter 中返回明确 unsupported
-- [ ] 16 个用例全部通过；pipe 内容、UNIX socket 状态、SCM_RIGHTS 和文件锁留待后续
-- [ ] 在真实 CRIU 可用的 guest 中完成 regular-fd cross-restore；当前目标 guest 镜像未提供 criu binary
+- [ ] regular-file fd 表、任意 fd 号、dup/object-id 去重和 `O_TRUNC` 清理
+- [ ] pipe 两端关联、未读数据、空 pipe 和写端关闭状态
+- [ ] 已连接 UNIX stream/socketpair 的 peer、队列数据和 shutdown 状态
+- [ ] converter 两阶段校验，失败不留下部分镜像
+- [ ] A3/A4 回归和 Linux 5.10.29 guest gate
+- [ ] 在真实 CRIU 可用的 guest 中完成 regular/pipe/UNIX stream cross-restore
 
-## 7. 本轮实现记录（2026-09-16）
+以下不是 A5 完成条件，必须记录为后续扩展：listener、pathname-bound、datagram、
+seqpacket、`SCM_RIGHTS`、其他 ancillary data、外部 peer、TCP/INET、FIFO、文件锁、
+完整 socket options 和跨进程复杂 fd 对象图。
+
+## 7. 当前实现基线（2026-09-16）
 
 - Feature branch: `codex/a5-fds`。
 - 新增扩展 FD TLV（576 bytes），旧 560-byte A3 记录仍可读；扩展尾部包含
   `object_id`、`type` 和 `object_flags`。
 - 内核在 `file_lock` 下只做 fd 指针快照和 `get_file()`，释放锁后再做路径读取和
   snapshot I/O；regular file 记录会清理 `O_CREAT|O_EXCL|O_TRUNC`。
-- FIFO/pipe、UNIX socket、删除文件和其他非 regular 类型在本轮返回 `-EOPNOTSUPP`，
-  不生成可被 restore 误用的部分镜像。
+- 当前分支只完成 regular-file 框架；FIFO/pipe、UNIX socket、删除文件和其他非 regular
+  类型仍返回 `-EOPNOTSUPP`。这只是方案 2 实现前的基线，不是 A5 最终完成状态。
 - 新鲜门禁命令：
 
   ```sh
