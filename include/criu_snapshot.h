@@ -129,6 +129,7 @@ struct criu_snapshot_fd_record {
 static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
 static_assert(sizeof(struct criu_snapshot_footer) == CRIU_SNAPSHOT_FOOTER_SIZE, "snapshot footer ABI size");
+static_assert(sizeof(struct criu_snapshot_fd_record) == CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE, "snapshot fd ABI size");
 #else
 _Static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 _Static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
