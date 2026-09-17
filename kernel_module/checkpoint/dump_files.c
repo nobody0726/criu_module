@@ -11,6 +11,9 @@
 #include <linux/socket.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/highmem.h>
+#include <linux/skbuff.h>
+#include <net/af_unix.h>
+#include <net/sock.h>
 
 #include "../core/objmap.h"
 #include "dump_files.h"
@@ -155,6 +158,79 @@ static int dump_pipe_state(unsigned int fd, struct file *file,
 	return ret;
 }
 
+static int dump_unix_state(struct file *file, struct dump_fd_ctx *ctx,
+				 u64 object_id)
+{
+	struct sock *sk, *peer;
+	struct criu_snapshot_unix_socket_record rec;
+	struct sk_buff *skb;
+	unsigned int bytes = 0;
+	char *payload;
+	int ret;
+
+	sk = unix_get_socket(file);
+	if (!sk || sk->sk_family != AF_UNIX || sk->sk_type != SOCK_STREAM ||
+		sk->sk_state != TCP_ESTABLISHED)
+		return -EOPNOTSUPP;
+	peer = unix_peer_get(sk);
+	if (!peer)
+		return -EOPNOTSUPP;
+	memset(&rec, 0, sizeof(rec));
+	rec.version = CRIU_SNAPSHOT_UNIX_SOCKET_VERSION;
+	rec.object_id = object_id;
+	rec.peer_object_id = (u64)peer->sk_socket ?
+		(u64)file_inode(peer->sk_socket->file)->i_ino : 0;
+	rec.family = AF_UNIX;
+	rec.socket_type = SOCK_STREAM;
+	rec.state = sk->sk_state;
+	ret = criu_snapshot_writer_record(ctx->writer,
+			CRIU_SNAPSHOT_REC_UNIX_SOCKET, 0, &rec, sizeof(rec));
+	if (ret)
+		goto out_peer;
+	spin_lock_bh(&sk->sk_receive_queue.lock);
+	skb_queue_walk(&sk->sk_receive_queue, skb) {
+		if (UNIXCB(skb).fp || skb->len > UINT_MAX - bytes) {
+			spin_unlock_bh(&sk->sk_receive_queue.lock);
+			ret = -EOPNOTSUPP;
+			goto out_peer;
+		}
+		bytes += skb->len;
+	}
+	spin_unlock_bh(&sk->sk_receive_queue.lock);
+	payload = kmalloc(sizeof(struct criu_snapshot_socket_queue_record) + bytes,
+			GFP_KERNEL);
+	if (!payload) { ret = -ENOMEM; goto out_peer; }
+	{
+		struct criu_snapshot_socket_queue_record *queue =
+			(struct criu_snapshot_socket_queue_record *)payload;
+		memset(queue, 0, sizeof(*queue));
+		queue->version = CRIU_SNAPSHOT_SOCKET_QUEUE_VERSION;
+		queue->object_id = object_id;
+		queue->data_len = bytes;
+		spin_lock_bh(&sk->sk_receive_queue.lock);
+		bytes = 0;
+		skb_queue_walk(&sk->sk_receive_queue, skb) {
+			if (skb_copy_bits(skb, 0, payload + sizeof(*queue) + bytes,
+					skb->len)) {
+				spin_unlock_bh(&sk->sk_receive_queue.lock);
+				kfree(payload);
+				ret = -EIO;
+				goto out_peer;
+			}
+			bytes += skb->len;
+		}
+		spin_unlock_bh(&sk->sk_receive_queue.lock);
+	}
+	ret = criu_snapshot_writer_record(ctx->writer,
+			CRIU_SNAPSHOT_REC_SOCKET_QUEUE, 0, payload,
+			sizeof(struct criu_snapshot_socket_queue_record) +
+			((struct criu_snapshot_socket_queue_record *)payload)->data_len);
+	kfree(payload);
+out_peer:
+	sock_put(peer);
+	return ret;
+}
+
 static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 {
 	struct dump_fd_ctx *ctx = arg;
@@ -172,7 +248,8 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 		type = CRIU_FD_TYPE_UNIX;
 	else
 		return -EOPNOTSUPP;
-	if (type != CRIU_FD_TYPE_REG && type != CRIU_FD_TYPE_PIPE)
+	if (type != CRIU_FD_TYPE_REG && type != CRIU_FD_TYPE_PIPE &&
+		type != CRIU_FD_TYPE_UNIX)
 		return -EOPNOTSUPP;
 	memset(&rec, 0, sizeof(rec));
 	rec.fd = fd;
@@ -188,6 +265,10 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 		return -ENOMEM;
 	if (type == CRIU_FD_TYPE_PIPE) {
 		ret = dump_pipe_state(fd, file, ctx, rec.object_id);
+		if (ret)
+			return ret;
+	} else if (type == CRIU_FD_TYPE_UNIX) {
+		ret = dump_unix_state(file, ctx, rec.object_id);
 		if (ret)
 			return ret;
 	} else {

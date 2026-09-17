@@ -28,6 +28,9 @@
 #define FS_MAGIC 0x51403912U
 #define CREDS_MAGIC 0x54023547U
 #define FILES_MAGIC 0x56303138U
+#define PIPES_DATA_MAGIC 0x56213733U
+#define UNIXSK_MAGIC 0x56213734U
+#define SK_QUEUES_MAGIC 0x56213735U
 
 #define ELF_ARCH_X86_64 62U
 #define ELF_ARCH_AARCH64 183U
@@ -541,6 +544,20 @@ static int build_fd_object_table(const struct snapshot_model *model,
 		ret = queue_object_ref_add(table, u64(record + 8));
 		if (ret)
 			goto error;
+	}
+	for (i = 0; i < model->fds.count; i++) {
+		const uint8_t *fd = model->fds.items[i].data;
+		uint32_t type = model->fds.items[i].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
+			u32(fd + FD_TYPE_OFFSET) : CRIU_FD_TYPE_REG;
+		size_t j;
+		bool found = false;
+		if (type == CRIU_FD_TYPE_PIPE) {
+			for (j = 0; j < model->pipe_endpoints.count; j++)
+				if (u64(model->pipe_endpoints.items[j].data + 8) ==
+					u64(fd + FD_OBJECT_ID_OFFSET))
+					found = true;
+			if (!found) { ret = SNAPSHOT_READER_FORMAT_ERROR; goto error; }
+		}
 	}
 	return 0;
 
@@ -1316,7 +1333,7 @@ static int file_table_add_object(struct file_table *files, const char *path,
 	struct file_item *item;
 	size_t i;
 
-	if (!path || !path[0] || strlen(path) >= sizeof(files->items[0].path))
+	if (!path || strlen(path) >= sizeof(files->items[0].path))
 		return -1;
 	for (i = 0; i < files->count; i++)
 		if (file_item_matches(&files->items[i], dev, ino, path, object_id)) {
@@ -1434,14 +1451,16 @@ static int build_file_table(const struct snapshot_model *model,
 	} else if (model->fds.count) {
 		const uint8_t *fd = model->fds.items[0].data;
 		char path[512];
-		if (copy_fixed_string(path, sizeof(path), fd + 48, 512) ||
-			file_table_add_object(files, path, u64(fd + 24), u64(fd + 32),
+		uint32_t type = model->fds.items[0].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
+			u32(fd + FD_TYPE_OFFSET) : CRIU_FD_TYPE_REG;
+		if ((type == CRIU_FD_TYPE_REG && copy_fixed_string(path, sizeof(path), fd + 48, 512)) ||
+			file_table_add_object(files, type == CRIU_FD_TYPE_REG ? path : "",
+				u64(fd + 24), u64(fd + 32),
 				u32(fd + 4), u64(fd + 8), u64(fd + 16), u64(fd + 40),
 				true, false,
 				model->fds.items[0].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
 					u64(fd + FD_OBJECT_ID_OFFSET) : 0,
-				model->fds.items[0].len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE ?
-					u32(fd + FD_TYPE_OFFSET) : CRIU_FD_TYPE_REG,
+				type,
 				&files->exe_id))
 			goto error;
 	} else {
@@ -1523,11 +1542,36 @@ static int build_reg_file(const struct file_item *item,
 
 static int build_file_entry(const struct file_item *item,
 				const struct blob_ref *creds,
+				const struct snapshot_model *model,
 				struct image_writer *message)
 {
 	struct image_writer reg;
+	struct image_writer fown;
+	struct image_writer pipe;
+	size_t i;
 	int ret;
 
+	if (item->type == CRIU_FD_TYPE_PIPE) {
+		image_writer_init(&fown);
+		image_writer_init(&pipe);
+		ret = image_writer_field_varint(message, 1, 2) ||
+			image_writer_field_varint(message, 2, item->id);
+		for (i = 0; !ret && i < model->pipe_endpoints.count; i++) {
+			const uint8_t *p = model->pipe_endpoints.items[i].data;
+			if (u64(p + 8) == item->object_id) {
+				ret = image_writer_field_varint(&pipe, 1, item->id) ||
+					image_writer_field_varint(&pipe, 2, (uint32_t)u64(p + 16)) ||
+					image_writer_field_varint(&pipe, 3, item->flags);
+				break;
+			}
+		}
+		if (!ret) ret = build_fown(creds, &fown);
+		if (!ret) ret = add_nested(&pipe, 4, &fown);
+		if (!ret) ret = add_nested(message, 18, &pipe);
+		image_writer_free(&fown);
+		image_writer_free(&pipe);
+		return ret;
+	}
 	image_writer_init(&reg);
 	ret = image_writer_field_varint(message, 1, 1) ||
 		image_writer_field_varint(message, 2, item->id);
@@ -1758,16 +1802,6 @@ int criu_emit_images(const struct snapshot_document *doc,
 		model_free(&model);
 		return 0;
 	}
-	for (i = 0; i < model.fds.count; i++) {
-		const struct blob_ref *fd = &model.fds.items[i];
-
-		if (fd->len >= CRIU_SNAPSHOT_FD_EXT_RECORD_SIZE &&
-			u32(fd->data + FD_TYPE_OFFSET) != CRIU_FD_TYPE_REG) {
-			fd_object_table_free(&fd_objects);
-			model_free(&model);
-			return SNAPSHOT_READER_UNSUPPORTED;
-		}
-	}
 	ret = build_file_table(&model, &files);
 	if (ret) {
 		fprintf(stderr, "converter: build_file_table rc=%d\n", ret);
@@ -1885,8 +1919,10 @@ int criu_emit_images(const struct snapshot_document *doc,
 	for (i = 0; i < files.count; i++) {
 		image_writer_init(&file_messages[i]);
 		image_writer_init(&reg_messages[i]);
-		if (build_file_entry(&files.items[i], &model.creds, &file_messages[i]) ||
-			build_reg_file(&files.items[i], &model.creds, &reg_messages[i])) {
+		if (build_file_entry(&files.items[i], &model.creds, &model,
+				&file_messages[i]) ||
+			(files.items[i].type == CRIU_FD_TYPE_REG &&
+			 build_reg_file(&files.items[i], &model.creds, &reg_messages[i]))) {
 			ret = SNAPSHOT_READER_IO_ERROR;
 			goto out_message;
 		}
@@ -1898,6 +1934,40 @@ int criu_emit_images(const struct snapshot_document *doc,
 			reg_messages, files.count, false)) {
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
+	}
+	/* A5 object records are validated above; emit raw type-specific streams only
+	 * after the generic files image has been written successfully. */
+	if (model.pipe_data.count) {
+		struct image_writer *pipes = calloc(model.pipe_data.count, sizeof(*pipes));
+		if (!pipes) { ret = SNAPSHOT_READER_IO_ERROR; goto out_message; }
+		for (i = 0; i < model.pipe_data.count; i++) {
+			image_writer_init(&pipes[i]);
+			if (image_writer_field_varint(&pipes[i], 1, u64(model.pipe_data.items[i].data + 8)) ||
+				image_writer_field_varint(&pipes[i], 2, u32(model.pipe_data.items[i].data + 24))) {
+				free_messages(pipes, model.pipe_data.count); ret = SNAPSHOT_READER_IO_ERROR; goto out_message;
+			}
+		}
+		if (emit_messages(options->output_dir, "pipes-data.img", PIPES_DATA_MAGIC,
+				pipes, model.pipe_data.count, false)) {
+			free_messages(pipes, model.pipe_data.count); ret = SNAPSHOT_READER_IO_ERROR; goto out_message;
+		}
+		free_messages(pipes, model.pipe_data.count);
+	}
+	if (model.unix_sockets.count) {
+		struct image_writer *sockets = calloc(model.unix_sockets.count, sizeof(*sockets));
+		if (!sockets) { ret = SNAPSHOT_READER_IO_ERROR; goto out_message; }
+		for (i = 0; i < model.unix_sockets.count; i++) {
+			image_writer_init(&sockets[i]);
+			if (image_writer_field_varint(&sockets[i], 1, u64(model.unix_sockets.items[i].data + 8)) ||
+				image_writer_field_varint(&sockets[i], 2, u64(model.unix_sockets.items[i].data + 16)) ||
+				image_writer_field_varint(&sockets[i], 3, u32(model.unix_sockets.items[i].data + 28))) {
+				free_messages(sockets, model.unix_sockets.count); ret = SNAPSHOT_READER_IO_ERROR; goto out_message;
+			}
+		}
+		if (emit_messages(options->output_dir, "unixsk.img", UNIXSK_MAGIC, sockets, model.unix_sockets.count, false)) {
+			free_messages(sockets, model.unix_sockets.count); ret = SNAPSHOT_READER_IO_ERROR; goto out_message;
+		}
+		free_messages(sockets, model.unix_sockets.count);
 	}
 	for (i = 0; i < files.binding_count; i++) {
 		image_writer_init(&fd_messages[i]);
