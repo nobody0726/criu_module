@@ -165,3 +165,14 @@ git diff --check
 ## 完成判定
 
 A5 仅在 Task 1-8 全部完成、真实 guest CRIU restore 行为通过、A3/A4 回归通过且所有延期能力已在文档备忘中列明时发布。缺少 guest CRIU、只通过 converter、或只在 macOS/Lima host kernel 通过，都不能称为 A5 完成。
+
+## 执行记录（2026-09-17）
+
+- 已完成并提交 Task 1 的扩展 ABI/object-record contract：`5e2ed96`。
+- 已完成并提交 Task 2 的 pipe/UNIX stream fixtures 和 malformed-object 拒绝用例：`985c533`。
+- 已完成 pipe endpoint/unread-data 初步内核采集，修复 Linux 5.10.29 的 `kmap_atomic`
+  兼容性，并接入 UNIX stream 元数据/队列采集初版：`1524832`、`d76a8b7`。
+- Lima userspace、fixtures 和 Linux 5.10.29 module 构建通过；嵌套 guest 输出
+  `A5_FD_GUEST: PASS (dump/converter gate; CRIU unavailable)`。
+- macOS 静态链接仍因缺失 `crt0.o` 不可用；该结果不计入 Linux 验证。
+- Task 5-8 的完整 CRIU protobuf image 兼容性、行为 fixture 和真实 cross-restore 仍待完成。

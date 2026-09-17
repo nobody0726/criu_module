@@ -397,6 +397,11 @@ zdtm/static/socket-tcp   # 预期失败,A5 不做 TCP
 - [ ] A3/A4 回归和 Linux 5.10.29 guest gate
 - [ ] 在真实 CRIU 可用的 guest 中完成 regular/pipe/UNIX stream cross-restore
 
+当前状态（2026-09-17）：snapshot ABI、pipe/UNIX stream 的初步内核采集接线、对象图
+解析和本地失败用例已提交；Linux 5.10.29 guest 已通过 dump/converter gate，但 guest
+没有可用 CRIU，因此真实 restore、队列行为和完整 CRIU image 兼容性仍未验证，A5 不得
+标记为完成。
+
 以下不是 A5 完成条件，必须记录为后续扩展：listener、pathname-bound、datagram、
 seqpacket、`SCM_RIGHTS`、其他 ancillary data、外部 peer、TCP/INET、FIFO、文件锁、
 完整 socket options 和跨进程复杂 fd 对象图。
