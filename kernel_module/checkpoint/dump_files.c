@@ -9,6 +9,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/socket.h>
+#include <linux/pipe_fs_i.h>
+#include <linux/highmem.h>
 
 #include "../core/objmap.h"
 #include "dump_files.h"
@@ -97,6 +99,62 @@ struct dump_fd_ctx {
 	struct criu_objmap *objects;
 };
 
+static int dump_pipe_state(unsigned int fd, struct file *file,
+				struct dump_fd_ctx *ctx, u64 object_id)
+{
+	struct pipe_inode_info *pipe = file->private_data;
+	struct criu_snapshot_pipe_endpoint_record endpoint;
+	struct criu_snapshot_pipe_data_record *data;
+	unsigned int i, used, bytes = 0;
+	char *payload;
+	bool read_end = !!(file->f_mode & FMODE_READ);
+	int ret;
+
+	if (!pipe || !pipe->bufs || !pipe->ring_size)
+		return -EOPNOTSUPP;
+	memset(&endpoint, 0, sizeof(endpoint));
+	endpoint.version = CRIU_SNAPSHOT_PIPE_ENDPOINT_VERSION;
+	endpoint.object_id = object_id;
+	endpoint.pipe_id = file_inode(file)->i_ino;
+	endpoint.direction = read_end ? CRIU_PIPE_DIRECTION_READ : CRIU_PIPE_DIRECTION_WRITE;
+	if (!pipe->writers)
+		endpoint.flags |= CRIU_PIPE_FLAG_WRITE_CLOSED;
+	ret = criu_snapshot_writer_record(ctx->writer, CRIU_SNAPSHOT_REC_PIPE_ENDPOINT,
+						0, &endpoint, sizeof(endpoint));
+	if (ret || !read_end)
+		return ret;
+	pipe_lock(pipe);
+	used = pipe->head - pipe->tail;
+	for (i = pipe->tail; i != pipe->head; i++) {
+		struct pipe_buffer *buf = &pipe->bufs[i & (pipe->ring_size - 1)];
+		if (!buf->page || !buf->ops || buf->ops->confirm || buf->len > PAGE_SIZE)
+			{ pipe_unlock(pipe); return -EOPNOTSUPP; }
+		if (bytes > UINT_MAX - buf->len) { pipe_unlock(pipe); return -EOVERFLOW; }
+		bytes += buf->len;
+	}
+	payload = kmalloc(sizeof(*data) + bytes, GFP_KERNEL);
+	if (!payload) { pipe_unlock(pipe); return -ENOMEM; }
+	data = (struct criu_snapshot_pipe_data_record *)payload;
+	memset(data, 0, sizeof(*data));
+	data->version = CRIU_SNAPSHOT_PIPE_DATA_VERSION;
+	data->pipe_id = endpoint.pipe_id;
+	data->capacity = (u64)pipe->ring_size * PAGE_SIZE;
+	data->data_len = bytes;
+	bytes = 0;
+	for (i = pipe->tail; i != pipe->head; i++) {
+		struct pipe_buffer *buf = &pipe->bufs[i & (pipe->ring_size - 1)];
+		void *mapped = kmap_atomic(buf->page);
+		memcpy(payload + sizeof(*data) + bytes, mapped + buf->offset, buf->len);
+		kunmap_atomic(mapped);
+		bytes += buf->len;
+	}
+	pipe_unlock(pipe);
+	ret = criu_snapshot_writer_record(ctx->writer, CRIU_SNAPSHOT_REC_PIPE_DATA,
+						0, payload, sizeof(*data) + data->data_len);
+	kfree(payload);
+	return ret;
+}
+
 static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 {
 	struct dump_fd_ctx *ctx = arg;
@@ -114,7 +172,7 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 		type = CRIU_FD_TYPE_UNIX;
 	else
 		return -EOPNOTSUPP;
-	if (type != CRIU_FD_TYPE_REG)
+	if (type != CRIU_FD_TYPE_REG && type != CRIU_FD_TYPE_PIPE)
 		return -EOPNOTSUPP;
 	memset(&rec, 0, sizeof(rec));
 	rec.fd = fd;
@@ -125,16 +183,21 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 	rec.ino = inode->i_ino;
 	rec.size = i_size_read(inode);
 	rec.type = type;
-	ret = path_text(&file->f_path, rec.path, sizeof(rec.path));
-	if (ret)
-		return ret;
-	if (strstr(rec.path, " (deleted)"))
-		return -EOPNOTSUPP;
 	rec.object_id = criu_objmap_get(ctx->objects, file, &is_new);
 	if (!rec.object_id)
 		return -ENOMEM;
-	return criu_snapshot_writer_record(ctx->writer, CRIU_SNAPSHOT_REC_FD,
-					 0, &rec, sizeof(rec));
+	if (type == CRIU_FD_TYPE_PIPE) {
+		ret = dump_pipe_state(fd, file, ctx, rec.object_id);
+		if (ret)
+			return ret;
+	} else {
+		ret = path_text(&file->f_path, rec.path, sizeof(rec.path));
+		if (ret || strstr(rec.path, " (deleted)"))
+			return ret ? ret : -EOPNOTSUPP;
+	}
+	ret = criu_snapshot_writer_record(ctx->writer, CRIU_SNAPSHOT_REC_FD,
+						 0, &rec, sizeof(rec));
+	return ret;
 }
 
 int criu_dump_files(struct task_struct *task,
