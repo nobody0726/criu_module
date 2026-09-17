@@ -101,4 +101,28 @@ rc=$?
 set -e
 test "$rc" -eq 1
 test ! -e "$TMP/pipe-images/files.img"
+
+python3 - "$TMP/bad-pipe.bin" "$TMP/bad-peer.bin" <<'PY'
+import struct, sys
+def tlv(kind, payload):
+    return struct.pack('<HHIQ', kind, 0, 0, len(payload)) + payload
+def snap(records):
+    header = struct.pack('<QHHIIIIQIIQQ', 0x43524955534e5033, 1, 64, 0, 0, 4096, 1234, 1234, 1, 0, 0, 0)
+    end = tlv(0xffff, b'')
+    body = b''.join(records) + end
+    footer = struct.pack('<QIIQ', 0x43524955534e5033, 1, len(records)+1, 0)
+    return header + body + footer
+pipe = struct.pack('<IIQQII', 1, 0, 10, 20, 1, 0)
+open(sys.argv[1], 'wb').write(snap([tlv(11, pipe)]))
+sock = struct.pack('<IIQQIIIIQ', 1, 0, 30, 99, 1, 1, 1, 0, 0)
+open(sys.argv[2], 'wb').write(snap([tlv(13, sock)]))
+PY
+if "$ROOT/userspace/criu-module-convert/criu-module-convert" "$TMP/bad-pipe.bin" -D "$TMP/bad-pipe-images"; then
+	 echo 'converter accepted incomplete pipe object' >&2; exit 1
+fi
+if "$ROOT/userspace/criu-module-convert/criu-module-convert" "$TMP/bad-peer.bin" -D "$TMP/bad-peer-images"; then
+	 echo 'converter accepted incomplete unix object' >&2; exit 1
+fi
+test ! -e "$TMP/bad-pipe-images/files.img"
+test ! -e "$TMP/bad-peer-images/files.img"
 echo 'A5_CONVERTER_FDS: PASS'
