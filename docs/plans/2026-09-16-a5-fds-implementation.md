@@ -176,3 +176,26 @@ A5 仅在 Task 1-8 全部完成、真实 guest CRIU restore 行为通过、A3/A4
   `A5_FD_GUEST: PASS (dump/converter gate; CRIU unavailable)`。
 - macOS 静态链接仍因缺失 `crt0.o` 不可用；该结果不计入 Linux 验证。
 - Task 5-8 的完整 CRIU protobuf image 兼容性、行为 fixture 和真实 cross-restore 仍待完成。
+
+## 收尾记录（2026-09-18）
+
+执行依据仍是 Task 1–8；以上 09-17 状态为历史记录。验证证据与复现命令见
+[A5 验证记录](2026-09-18-a5-verification.md)。
+
+Task 1–8 已完成：A5 正向真实 restore、17 个拒绝/回滚用例、静态 contracts、
+Lima 构建与最终 A3/A4 guest 回归全部通过。全量 ZDTM/GitHub CI 仍为扩展验证，
+不作为已执行结果。
+
+- Task 3/4 的 pipe/socket 采集集中在 `checkpoint/dump_files.c`，共享一次 fd
+  pin、对象预扫描和错误清理；未拆出计划中的 `dump_pipe.c/dump_unixsk.c`。
+- Task 5 实现真实 CRIU magic、protobuf + raw payload、PIPE/UNIXSK tagged entries；
+  `tests/a5-images.sh` 复用 converter fixtures，校验完整对象图及原子发布。
+- Task 6 使用 stdin 普通文件触发行为检查。不能使用自定义信号处理器，因为其恢复属于
+  A6；保持 A3 的默认 disposition 约束。单独保存 descriptor 的 `FD_CLOEXEC`。
+- Task 7 验收包含恢复后两次响应，而非只检查 CRIU 返回码。负向用例同时检查
+  `EOPNOTSUPP`、snapshot 清理和目标继续运行。
+- Task 8 对 A3/A4 进行真实 guest 回归；旧静态 contract 中“仅 fd 0/1/2”和
+  “THREAD 是最后一种记录”的断言随 A5 范围更新。
+- worktree 不复制 upstream checkout；`CRIU_SOURCE` 让 QEMU staging 复用主仓库
+  已构建 CRIU 和 Python decoder。临时 `criu-bin` 不进入提交。
+- 本次只提交 `codex/a5-fds`；合并和远程发布不属于本次执行动作。

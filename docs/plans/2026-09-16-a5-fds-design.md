@@ -15,6 +15,8 @@ socket；对象共享关系必须和数据内容一起保留。
 
 - regular file：路径、清理后的 open flags、位置、设备号/inode、大小和对象 ID；
 - 任意 fd 号和 fd 空洞；相同 `struct file *` 只建立一个 object ID；
+- 每个 descriptor 的 `FD_CLOEXEC` 独立保存；mmap backing file 与实际 open
+  description 分开建模，同 inode 不等于同一个打开对象；
 - pipe：两个 endpoint 的关联、读写方向、容量、未读普通字节、空 pipe 和写端
   已关闭状态；
 - `AF_UNIX/SOCK_STREAM`：`socketpair()` 或已连接 socket、peer 关系、未读普通字节
@@ -93,6 +95,11 @@ snapshot/converter gate，不能声称 cross-restore 通过。
 pathname-bound/listen/backlog、UNIX datagram/seqpacket、`SCM_RIGHTS` 对象图、其他
 ancillary data、外部 peer、跨 namespace、TCP/INET、FIFO、文件锁、完整 socket options
 和多进程共享 fd 表均保留为后续任务，不加入 A5 完成标准。
+
+`F_SETOWN/O_ASYNC` 的信号语义归入 A6，目前明确拒绝；同线程组独立 fd 表、
+外部 `CLONE_FILES` owner 和外部 pipe/socket 参与者也明确拒绝。IPC 引用计数
+检查采取保守策略，多余引用可能属于外部任务或进行中的操作，不能视为安全闭包。
+既有全量 ZDTM 列表是扩展验证备忘，不因本轮定向 gate 通过而自动加入 allowlist。
 
 ## A3 复盘约束
 

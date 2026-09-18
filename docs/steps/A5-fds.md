@@ -363,7 +363,7 @@ int main(void)
 | 12 | 已删除文件的 fd | 明确 `-EOPNOTSUPP`,不产出错误镜像 |
 | 13 | in-flight `SCM_RIGHTS` | 明确 `-EOPNOTSUPP` |
 | 14 | 1024 个 fd | 完成,id 分配无冲突 |
-| 15 | `F_SETOWN` 设过的 fd | fown 恢复,信号能收到 |
+| 15 | `F_SETOWN` 设过的 fd | A5 明确拒绝；fown 信号恢复留给 A6 |
 | 16 | `fcntl` 文件锁 | 明确支持或明确 `-EOPNOTSUPP` |
 
 用例 11 单列,因为它是唯一一个**失败会毁用户数据**的用例。
@@ -390,23 +390,26 @@ zdtm/static/socket-tcp   # 预期失败,A5 不做 TCP
 
 ## 6. 完成标准
 
-- [ ] regular-file fd 表、任意 fd 号、dup/object-id 去重和 `O_TRUNC` 清理
-- [ ] pipe 两端关联、未读数据、空 pipe 和写端关闭状态
-- [ ] 已连接 UNIX stream/socketpair 的 peer、队列数据和 shutdown 状态
-- [ ] converter 两阶段校验，失败不留下部分镜像
-- [ ] A3/A4 回归和 Linux 5.10.29 guest gate
-- [ ] 在真实 CRIU 可用的 guest 中完成 regular/pipe/UNIX stream cross-restore
+- [x] regular-file fd 表、任意 fd 号、dup/object-id 去重和 `O_TRUNC` 清理
+- [x] pipe 两端关联、未读数据、空 pipe 和写端关闭状态
+- [x] 已连接 UNIX stream/socketpair 的 peer、队列数据和 shutdown 状态
+- [x] converter 两阶段校验，失败不留下部分镜像
+- [x] A3/A4 回归和 Linux 5.10.29 guest gate
+- [x] 在真实 CRIU 可用的 guest 中完成 regular/pipe/UNIX stream cross-restore
 
-当前状态（2026-09-17）：snapshot ABI、pipe/UNIX stream 的初步内核采集接线、对象图
-解析和本地失败用例已提交；Linux 5.10.29 guest 已通过 dump/converter gate，但 guest
-没有可用 CRIU，因此真实 restore、队列行为和完整 CRIU image 兼容性仍未验证，A5 不得
-标记为完成。
+当前状态（2026-09-18）：A5 Task 1–8 已按确认范围完成。嵌套 Linux 5.10.29
+guest 输出 `A5_CROSS_RESTORE: PASS`、`A5_UNSUPPORTED: PASS`、
+`A3_CROSS_RESTORE: PASS`、`A4_CROSS_RESTORE: PASS` 和
+`A5_REGRESSION: PASS`。恢复后行为与第二次响应均已验证，guest dmesg 无
+KASAN/lockdep/oops。代码保留在 `codex/a5-fds`，尚未合并或推送。
+详见 [验证记录](../plans/2026-09-18-a5-verification.md)。
 
 以下不是 A5 完成条件，必须记录为后续扩展：listener、pathname-bound、datagram、
 seqpacket、`SCM_RIGHTS`、其他 ancillary data、外部 peer、TCP/INET、FIFO、文件锁、
-完整 socket options 和跨进程复杂 fd 对象图。
+完整 socket options 和跨进程复杂 fd 对象图；`F_SETOWN/O_ASYNC` 归入 A6。
+原始 ZDTM 增量清单仍为扩展验证备忘，不把定向 gate 等同于全量 ZDTM 通过。
 
-## 7. 当前实现基线（2026-09-16）
+## 7. 历史实现基线（2026-09-16）
 
 - Feature branch: `codex/a5-fds`。
 - 新增扩展 FD TLV（576 bytes），旧 560-byte A3 记录仍可读；扩展尾部包含
