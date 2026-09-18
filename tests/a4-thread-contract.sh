@@ -25,7 +25,8 @@ if grep -q 'kernel_write' "$kernel_c"; then
 	echo 'thread enumeration must not perform image I/O' >&2
 	exit 1
 fi
-grep -q 'CRIU_SNAPSHOT_REC_THREAD' "$reader_c"
+# A5 extends the reader's contiguous known-record range beyond THREAD.
+grep -q 'CRIU_SNAPSHOT_REC_SOCKET_QUEUE' "$reader_c"
 grep -q 'threads' "$model_c"
 grep -q 'core-%u.img' "$model_c"
 grep -q 'dump_threads.o' "$makefile"

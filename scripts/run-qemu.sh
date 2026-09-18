@@ -17,6 +17,14 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # storage so the guest sees the Linux ELF artifacts produced by that build.
 QEMU_PROJECT_DIR="$(mktemp -d /tmp/criu-module-qemu.XXXXXX)"
 cp -a "$PROJECT_DIR"/. "$QEMU_PROJECT_DIR"/
+# A worktree need not duplicate the untracked upstream CRIU checkout. Stage
+# only its runtime binary and Python image decoder when explicitly supplied.
+if [ -n "${CRIU_SOURCE:-}" ]; then
+	test -x "$CRIU_SOURCE/criu/criu"
+	mkdir -p "$QEMU_PROJECT_DIR/criu/criu"
+	cp "$CRIU_SOURCE/criu/criu" "$QEMU_PROJECT_DIR/criu/criu/criu"
+	cp -a "$CRIU_SOURCE/crit" "$CRIU_SOURCE/lib" "$QEMU_PROJECT_DIR/criu/"
+fi
 if [ "$(uname -s)" = Linux ] && [ -f "$QEMU_PROJECT_DIR/userspace/Makefile" ]; then
 	# Rebuild executable artifacts inside the Lima-local staging tree.  A
 	# source tree mounted from macOS may contain Mach-O files even when the

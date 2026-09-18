@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -161,6 +162,38 @@ int image_writer_write_messages(const char *path, const void *prefix, size_t pre
 	}
 	ok = 1;
 	return finish_temp(fd, tmp, path, ok);
+}
+
+int image_writer_write_messages_with_raw(const char *path, const void *prefix,
+				size_t prefix_len,
+				const struct image_writer_raw_record *records, size_t count)
+{
+	char *tmp = NULL;
+	int fd;
+	size_t i;
+
+	if (!path || (!prefix && prefix_len) || (!records && count))
+		return -1;
+	fd = open_temp(path, &tmp);
+	if (fd < 0)
+		return -1;
+	if (write_all(fd, prefix, prefix_len))
+		return finish_temp(fd, tmp, path, 0);
+	for (i = 0; i < count; i++) {
+		uint8_t length[4];
+		const struct image_writer *message = records[i].message;
+
+		if (!message || message->len > UINT32_MAX ||
+			records[i].raw_len > INT_MAX) {
+			return finish_temp(fd, tmp, path, 0);
+		}
+		put_le32(length, (uint32_t)message->len);
+		if (write_all(fd, length, sizeof(length)) ||
+			write_all(fd, message->data, message->len) ||
+			write_all(fd, records[i].raw, records[i].raw_len))
+			return finish_temp(fd, tmp, path, 0);
+	}
+	return finish_temp(fd, tmp, path, 1);
 }
 
 int image_writer_write_file(const char *path, const void *prefix, size_t prefix_len,

@@ -41,6 +41,24 @@ void criu_objmap_free(struct criu_objmap *map)
 	kfree(map);
 }
 
+u32 criu_objmap_find(struct criu_objmap *map, const void *obj)
+{
+	struct criu_objmap_entry *entry;
+	u32 id = 0;
+
+	if (!map || !obj)
+		return 0;
+	mutex_lock(&map->lock);
+	list_for_each_entry(entry, &map->entries, list) {
+		if (entry->obj == obj) {
+			id = entry->id;
+			break;
+		}
+	}
+	mutex_unlock(&map->lock);
+	return id;
+}
+
 u32 criu_objmap_get(struct criu_objmap *map, const void *obj, bool *is_new)
 {
 	struct criu_objmap_entry *entry;

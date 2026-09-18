@@ -143,8 +143,11 @@ struct criu_snapshot_fd_record {
 	char path[512];
 	uint64_t object_id;
 	uint32_t type;
+	/* Historical field name; these are descriptor flags, not struct file flags. */
 	uint32_t object_flags;
 } CRIU_SNAPSHOT_PACKED;
+
+#define CRIU_FD_FLAG_CLOEXEC 1U
 
 /* Pipe endpoint objects are distinct struct file instances referring to one
  * shared pipe_id. Pipe bytes follow a fixed pipe-data header in the TLV. */

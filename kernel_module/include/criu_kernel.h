@@ -89,7 +89,8 @@ struct criu_freeze_status {
 };
 
 typedef int (*criu_vma_info_fn)(const struct criu_vma_info *info, void *arg);
-typedef int (*criu_fd_fn)(unsigned int fd, struct file *file, void *arg);
+typedef int (*criu_fd_fn)(unsigned int fd, struct file *file,
+			unsigned int fd_flags, void *arg);
 
 struct criu_objmap *criu_objmap_new(void);
 void criu_objmap_free(struct criu_objmap *map);

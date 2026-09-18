@@ -11,5 +11,6 @@ struct criu_objmap;
 struct criu_objmap *criu_objmap_new(void);
 void criu_objmap_free(struct criu_objmap *map);
 u32 criu_objmap_get(struct criu_objmap *map, const void *obj, bool *is_new);
+u32 criu_objmap_find(struct criu_objmap *map, const void *obj);
 
 #endif

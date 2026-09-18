@@ -11,6 +11,7 @@
 #include <linux/socket.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/highmem.h>
+#include <linux/magic.h>
 #include <linux/skbuff.h>
 #include <net/af_unix.h>
 #include <net/sock.h>
@@ -40,11 +41,85 @@ static int path_text(const struct path *path, char *out, size_t size)
 	return 0;
 }
 
-int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg)
+/* An A5 IPC object must be closed over the frozen fd table. Extra references
+ * may belong to an external task or in-flight operation; reject conservatively.
+ * Each local descriptor has its original and our pinned reference. */
+static int validate_ipc_scope(struct file **snapshot, unsigned int count)
+{
+	unsigned int i, j, refs, readers, writers;
+
+	for (i = 0; i < count; i++) {
+		struct file *file = snapshot[i];
+		struct pipe_inode_info *pipe;
+
+		if (!file || (!S_ISFIFO(file_inode(file)->i_mode) &&
+			      !S_ISSOCK(file_inode(file)->i_mode)))
+			continue;
+		refs = 0;
+		for (j = 0; j < count; j++)
+			if (snapshot[j] == file)
+				refs++;
+		if (file_count(file) != 2UL * refs)
+			return -EOPNOTSUPP;
+		if (!S_ISFIFO(file_inode(file)->i_mode))
+			continue;
+		if (file_inode(file)->i_sb->s_magic != PIPEFS_MAGIC)
+			return -EOPNOTSUPP;
+		pipe = file->private_data;
+		if (!pipe)
+			return -EOPNOTSUPP;
+		readers = writers = 0;
+		for (j = 0; j < count; j++) {
+			unsigned int k;
+			struct file *other = snapshot[j];
+			if (!other || file_inode(other) != file_inode(file))
+				continue;
+			for (k = 0; k < j; k++)
+				if (snapshot[k] == other)
+					break;
+			if (k != j)
+				continue;
+			readers += !!(other->f_mode & FMODE_READ);
+			writers += !!(other->f_mode & FMODE_WRITE);
+		}
+		pipe_lock(pipe);
+		j = readers == pipe->readers && writers == pipe->writers;
+		pipe_unlock(pipe);
+		if (!j)
+			return -EOPNOTSUPP;
+	}
+	return 0;
+}
+
+static int validate_files_scope(struct task_struct *task, struct files_struct *files)
+{
+	struct task_struct *thread;
+	unsigned int owners = 0;
+	int ret = 0;
+
+	/* 5.10 for_each_thread includes the leader. A single files image cannot
+	 * represent unshared per-thread tables or an unfrozen CLONE_FILES owner. */
+	rcu_read_lock();
+	for_each_thread(task, thread) {
+		task_lock(thread);
+		if (thread->files != files)
+			ret = -EOPNOTSUPP;
+		task_unlock(thread);
+		owners++;
+	}
+	rcu_read_unlock();
+	if (atomic_read(&files->count) != owners + 1)
+		ret = -EOPNOTSUPP;
+	return ret;
+}
+
+static int walk_fds_prepared(struct task_struct *task, criu_fd_fn prepare,
+			    criu_fd_fn fn, void *arg)
 {
 	struct files_struct *files;
 	struct fdtable *fdt;
 	struct file **snapshot;
+	unsigned int *fd_flags;
 	unsigned int i, count;
 	int ret = 0;
 
@@ -57,12 +132,20 @@ int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg)
 	task_unlock(task);
 	if (!files)
 		return -ESRCH;
+	if (prepare) {
+		ret = validate_files_scope(task, files);
+		if (ret)
+			goto out_files;
+	}
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
 	count = fdt->max_fds;
 	spin_unlock(&files->file_lock);
 	snapshot = kcalloc(count, sizeof(*snapshot), GFP_KERNEL);
-	if (!snapshot) {
+	fd_flags = kcalloc(count, sizeof(*fd_flags), GFP_KERNEL);
+	if (!snapshot || !fd_flags) {
+		kfree(snapshot);
+		kfree(fd_flags);
 		ret = -ENOMEM;
 		goto out_files;
 	}
@@ -74,32 +157,54 @@ int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg)
 		if (fdt->fd[i]) {
 			get_file(fdt->fd[i]);
 			snapshot[i] = fdt->fd[i];
+			fd_flags[i] = close_on_exec(i, fdt) ? CRIU_FD_FLAG_CLOEXEC : 0;
 		}
 	}
 	spin_unlock(&files->file_lock);
+	if (prepare) {
+		ret = validate_ipc_scope(snapshot, count);
+		if (ret)
+			goto release;
+	}
+	for (i = 0; i < count; i++) {
+		if (prepare && snapshot[i]) {
+			ret = prepare(i, snapshot[i], fd_flags[i], arg);
+			if (ret)
+				goto release;
+		}
+	}
 	for (i = 0; i < count; i++) {
 		if (!snapshot[i])
 			continue;
-		ret = fn(i, snapshot[i], arg);
-		fput(snapshot[i]);
+		ret = fn(i, snapshot[i], fd_flags[i], arg);
 		if (ret)
 			break;
 	}
-	while (i < count) {
+release:
+	/* Keep all objects pinned across discovery and serialization; release
+	 * each reference exactly once, including callback error paths. */
+	for (i = 0; i < count; i++) {
 		if (snapshot[i])
 			fput(snapshot[i]);
-		i++;
 	}
 	kfree(snapshot);
+	kfree(fd_flags);
 out_files:
 	if (WARN_ON_ONCE(atomic_dec_and_test(&files->count)))
 		atomic_inc(&files->count);
 	return ret;
 }
 
+int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg)
+{
+	return walk_fds_prepared(task, NULL, fn, arg);
+}
+
 struct dump_fd_ctx {
 	struct criu_snapshot_writer *writer;
 	struct criu_objmap *objects;
+	struct criu_objmap *emitted;
+	struct criu_objmap *pipes;
 };
 
 static int dump_pipe_state(unsigned int fd, struct file *file,
@@ -108,12 +213,15 @@ static int dump_pipe_state(unsigned int fd, struct file *file,
 	struct pipe_inode_info *pipe = file->private_data;
 	struct criu_snapshot_pipe_endpoint_record endpoint;
 	struct criu_snapshot_pipe_data_record *data;
-	unsigned int i, used, bytes = 0;
+	unsigned int i, bytes = 0;
 	char *payload;
 	bool read_end = !!(file->f_mode & FMODE_READ);
+	bool is_new;
 	int ret;
 
-	if (!pipe || !pipe->bufs || !pipe->ring_size)
+	if (!pipe || !pipe->bufs || !pipe->ring_size ||
+		file_inode(file)->i_sb->s_magic != PIPEFS_MAGIC ||
+		(file->f_flags & O_DIRECT))
 		return -EOPNOTSUPP;
 	memset(&endpoint, 0, sizeof(endpoint));
 	endpoint.version = CRIU_SNAPSHOT_PIPE_ENDPOINT_VERSION;
@@ -126,11 +234,20 @@ static int dump_pipe_state(unsigned int fd, struct file *file,
 						0, &endpoint, sizeof(endpoint));
 	if (ret || !read_end)
 		return ret;
+	if (!criu_objmap_get(ctx->pipes, pipe, &is_new))
+		return -ENOMEM;
+	if (!is_new)
+		return 0;
 	pipe_lock(pipe);
-	used = pipe->head - pipe->tail;
+	if (pipe->head - pipe->tail > pipe->ring_size) {
+		pipe_unlock(pipe);
+		return -EIO;
+	}
 	for (i = pipe->tail; i != pipe->head; i++) {
 		struct pipe_buffer *buf = &pipe->bufs[i & (pipe->ring_size - 1)];
-		if (!buf->page || !buf->ops || buf->ops->confirm || buf->len > PAGE_SIZE)
+		if (!buf->page || !buf->ops || buf->ops->confirm ||
+			(buf->flags & PIPE_BUF_FLAG_PACKET) || buf->offset > PAGE_SIZE ||
+			buf->len > PAGE_SIZE - buf->offset)
 			{ pipe_unlock(pipe); return -EOPNOTSUPP; }
 		if (bytes > UINT_MAX - buf->len) { pipe_unlock(pipe); return -EOVERFLOW; }
 		bytes += buf->len;
@@ -141,7 +258,7 @@ static int dump_pipe_state(unsigned int fd, struct file *file,
 	memset(data, 0, sizeof(*data));
 	data->version = CRIU_SNAPSHOT_PIPE_DATA_VERSION;
 	data->pipe_id = endpoint.pipe_id;
-	data->capacity = (u64)pipe->ring_size * PAGE_SIZE;
+	data->capacity = (u64)pipe->max_usage * PAGE_SIZE;
 	data->data_len = bytes;
 	bytes = 0;
 	for (i = pipe->tail; i != pipe->head; i++) {
@@ -170,7 +287,9 @@ static int dump_unix_state(struct file *file, struct dump_fd_ctx *ctx,
 
 	sk = unix_get_socket(file);
 	if (!sk || sk->sk_family != AF_UNIX || sk->sk_type != SOCK_STREAM ||
-		sk->sk_state != TCP_ESTABLISHED)
+		sk->sk_state != TCP_ESTABLISHED ||
+		test_bit(SOCK_PASSCRED, &sk->sk_socket->flags) ||
+		test_bit(SOCK_PASSSEC, &sk->sk_socket->flags))
 		return -EOPNOTSUPP;
 	peer = unix_peer_get(sk);
 	if (!peer)
@@ -178,23 +297,32 @@ static int dump_unix_state(struct file *file, struct dump_fd_ctx *ctx,
 	memset(&rec, 0, sizeof(rec));
 	rec.version = CRIU_SNAPSHOT_UNIX_SOCKET_VERSION;
 	rec.object_id = object_id;
-	rec.peer_object_id = (u64)peer->sk_socket ?
-		(u64)file_inode(peer->sk_socket->file)->i_ino : 0;
+	rec.peer_object_id = criu_objmap_find(ctx->objects, peer);
+	if (!rec.peer_object_id || unix_sk(peer)->peer != sk || unix_sk(sk)->addr ||
+		unix_sk(peer)->addr) {
+		ret = -EOPNOTSUPP;
+		goto out_peer;
+	}
 	rec.family = AF_UNIX;
 	rec.socket_type = SOCK_STREAM;
 	rec.state = sk->sk_state;
+	rec.shutdown = sk->sk_shutdown;
+	rec.options = (u64)(u32)sk->sk_sndbuf | ((u64)(u32)sk->sk_rcvbuf << 32);
 	ret = criu_snapshot_writer_record(ctx->writer,
 			CRIU_SNAPSHOT_REC_UNIX_SOCKET, 0, &rec, sizeof(rec));
 	if (ret)
 		goto out_peer;
 	spin_lock_bh(&sk->sk_receive_queue.lock);
 	skb_queue_walk(&sk->sk_receive_queue, skb) {
-		if (UNIXCB(skb).fp || skb->len > UINT_MAX - bytes) {
+		if (UNIXCB(skb).fp || UNIXCB(skb).pid ||
+		    UNIXCB(skb).consumed > skb->len ||
+		    skb->len - UNIXCB(skb).consumed > UINT_MAX - bytes) {
 			spin_unlock_bh(&sk->sk_receive_queue.lock);
 			ret = -EOPNOTSUPP;
 			goto out_peer;
 		}
-		bytes += skb->len;
+		/* 5.10 stream reads advance consumed, not skb->data/len. */
+		bytes += skb->len - UNIXCB(skb).consumed;
 	}
 	spin_unlock_bh(&sk->sk_receive_queue.lock);
 	payload = kmalloc(sizeof(struct criu_snapshot_socket_queue_record) + bytes,
@@ -210,16 +338,26 @@ static int dump_unix_state(struct file *file, struct dump_fd_ctx *ctx,
 		spin_lock_bh(&sk->sk_receive_queue.lock);
 		bytes = 0;
 		skb_queue_walk(&sk->sk_receive_queue, skb) {
-			if (skb_copy_bits(skb, 0, payload + sizeof(*queue) + bytes,
-					skb->len)) {
+			unsigned int consumed = UNIXCB(skb).consumed;
+			unsigned int remaining;
+
+			if (consumed > skb->len || UNIXCB(skb).fp || UNIXCB(skb).pid ||
+			    (remaining = skb->len - consumed) > queue->data_len - bytes ||
+			    skb_copy_bits(skb, consumed,
+					  payload + sizeof(*queue) + bytes, remaining)) {
 				spin_unlock_bh(&sk->sk_receive_queue.lock);
 				kfree(payload);
 				ret = -EIO;
 				goto out_peer;
 			}
-			bytes += skb->len;
+			bytes += remaining;
 		}
 		spin_unlock_bh(&sk->sk_receive_queue.lock);
+		if (bytes != queue->data_len) {
+			kfree(payload);
+			ret = -EAGAIN;
+			goto out_peer;
+		}
 	}
 	ret = criu_snapshot_writer_record(ctx->writer,
 			CRIU_SNAPSHOT_REC_SOCKET_QUEUE, 0, payload,
@@ -231,7 +369,8 @@ out_peer:
 	return ret;
 }
 
-static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
+static int dump_one_fd(unsigned int fd, struct file *file,
+		       unsigned int fd_flags, void *arg)
 {
 	struct dump_fd_ctx *ctx = arg;
 	struct criu_snapshot_fd_record rec;
@@ -240,6 +379,12 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 	u32 type;
 	int ret;
 
+	/* fown-driven signal delivery belongs to A6; never silently reset it. */
+	read_lock(&file->f_owner.lock);
+	ret = file->f_owner.pid ? -EOPNOTSUPP : 0;
+	read_unlock(&file->f_owner.lock);
+	if (ret || (file->f_flags & FASYNC))
+		return -EOPNOTSUPP;
 	if (S_ISREG(inode->i_mode))
 		type = CRIU_FD_TYPE_REG;
 	else if (S_ISFIFO(inode->i_mode))
@@ -248,11 +393,26 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 		type = CRIU_FD_TYPE_UNIX;
 	else
 		return -EOPNOTSUPP;
+	if (type == CRIU_FD_TYPE_REG) {
+		struct file_lock_context *locks = smp_load_acquire(&inode->i_flctx);
+		bool locked = false;
+
+		if (locks) {
+			spin_lock(&locks->flc_lock);
+			locked = !list_empty(&locks->flc_flock) ||
+				 !list_empty(&locks->flc_posix) ||
+				 !list_empty(&locks->flc_lease);
+			spin_unlock(&locks->flc_lock);
+		}
+		if (locked)
+			return -EOPNOTSUPP;
+	}
 	if (type != CRIU_FD_TYPE_REG && type != CRIU_FD_TYPE_PIPE &&
 		type != CRIU_FD_TYPE_UNIX)
 		return -EOPNOTSUPP;
 	memset(&rec, 0, sizeof(rec));
 	rec.fd = fd;
+	rec.object_flags = fd_flags;
 	rec.mode = inode->i_mode;
 	rec.flags = file->f_flags & ~(O_CREAT | O_EXCL | O_TRUNC);
 	rec.pos = file->f_pos;
@@ -260,18 +420,21 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 	rec.ino = inode->i_ino;
 	rec.size = i_size_read(inode);
 	rec.type = type;
-	rec.object_id = criu_objmap_get(ctx->objects, file, &is_new);
+	rec.object_id = criu_objmap_find(ctx->objects,
+			type == CRIU_FD_TYPE_UNIX ? (void *)unix_get_socket(file) : (void *)file);
 	if (!rec.object_id)
+		return -EIO;
+	if (!criu_objmap_get(ctx->emitted, file, &is_new))
 		return -ENOMEM;
-	if (type == CRIU_FD_TYPE_PIPE) {
+	if (type == CRIU_FD_TYPE_PIPE && is_new) {
 		ret = dump_pipe_state(fd, file, ctx, rec.object_id);
 		if (ret)
 			return ret;
-	} else if (type == CRIU_FD_TYPE_UNIX) {
+	} else if (type == CRIU_FD_TYPE_UNIX && is_new) {
 		ret = dump_unix_state(file, ctx, rec.object_id);
 		if (ret)
 			return ret;
-	} else {
+	} else if (type == CRIU_FD_TYPE_REG) {
 		ret = path_text(&file->f_path, rec.path, sizeof(rec.path));
 		if (ret || strstr(rec.path, " (deleted)"))
 			return ret ? ret : -EOPNOTSUPP;
@@ -279,6 +442,18 @@ static int dump_one_fd(unsigned int fd, struct file *file, void *arg)
 	ret = criu_snapshot_writer_record(ctx->writer, CRIU_SNAPSHOT_REC_FD,
 						 0, &rec, sizeof(rec));
 	return ret;
+}
+
+static int map_one_fd(unsigned int fd, struct file *file,
+		      unsigned int fd_flags, void *arg)
+{
+	struct dump_fd_ctx *ctx = arg;
+	void *key = S_ISSOCK(file_inode(file)->i_mode) ?
+		(void *)unix_get_socket(file) : (void *)file;
+
+	if (!key)
+		return -EOPNOTSUPP;
+	return criu_objmap_get(ctx->objects, key, NULL) ? 0 : -ENOMEM;
 }
 
 int criu_dump_files(struct task_struct *task,
@@ -297,7 +472,13 @@ int criu_dump_files(struct task_struct *task,
 		return -ENOMEM;
 	fd_ctx.writer = writer;
 	fd_ctx.objects = objects;
-	ret = criu_walk_fds(task, dump_one_fd, &fd_ctx);
+	fd_ctx.emitted = criu_objmap_new();
+	fd_ctx.pipes = criu_objmap_new();
+	if (!fd_ctx.emitted || !fd_ctx.pipes) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	ret = walk_fds_prepared(task, map_one_fd, dump_one_fd, &fd_ctx);
 	if (ret)
 		goto out;
 
@@ -313,6 +494,8 @@ int criu_dump_files(struct task_struct *task,
 		ret = criu_snapshot_writer_record(writer, CRIU_SNAPSHOT_REC_FS,
 						  0, &fs, sizeof(fs));
 out:
+	criu_objmap_free(fd_ctx.pipes);
+	criu_objmap_free(fd_ctx.emitted);
 	criu_objmap_free(objects);
 	return ret;
 }
