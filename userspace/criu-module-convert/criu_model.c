@@ -118,10 +118,15 @@ struct snapshot_model {
 	struct blob_list pipe_data;
 	struct blob_list unix_sockets;
 	struct blob_list socket_queues;
+	struct blob_ref sigactions;
+	struct blob_list signal_queues;
+	struct blob_ref itimers;
+	struct blob_ref posix_timers;
 	uint32_t arch;
 	uint32_t page_size;
 	uint32_t pid;
 	uint32_t tgid;
+	bool signal_timers;
 };
 
 struct file_item {
@@ -218,6 +223,7 @@ static void model_free(struct snapshot_model *model)
 	free(model->pipe_data.items);
 	free(model->unix_sockets.items);
 	free(model->socket_queues.items);
+	free(model->signal_queues.items);
 	memset(model, 0, sizeof(*model));
 }
 
@@ -265,6 +271,8 @@ static int collect_records(const struct snapshot_document *doc,
 	model->page_size = u32(doc->data + 20);
 	model->pid = u32(doc->data + 24);
 	model->tgid = u32(doc->data + 28);
+	model->signal_timers =
+		(u16(doc->data + 14) & CRIU_SNAPSHOT_F_SIGNAL_TIMERS) != 0;
 	end = doc->size - CRIU_SNAPSHOT_FOOTER_SIZE;
 	while (off < end) {
 		uint16_t type;
@@ -339,6 +347,22 @@ static int collect_records(const struct snapshot_document *doc,
 		case CRIU_SNAPSHOT_REC_SOCKET_QUEUE:
 			if (list_add(&model->socket_queues, payload, len))
 				goto io_error;
+			break;
+		case CRIU_SNAPSHOT_REC_SIGACTION:
+			if (set_blob(&model->sigactions, payload, len))
+				goto format_error;
+			break;
+		case CRIU_SNAPSHOT_REC_SIGNAL_QUEUE:
+			if (list_add(&model->signal_queues, payload, len))
+				goto io_error;
+			break;
+		case CRIU_SNAPSHOT_REC_ITIMERS:
+			if (set_blob(&model->itimers, payload, len))
+				goto format_error;
+			break;
+		case CRIU_SNAPSHOT_REC_POSIX_TIMERS:
+			if (set_blob(&model->posix_timers, payload, len))
+				goto format_error;
 			break;
 		default:
 			/* snapshot_read_validate() handled mandatory unknown records. */
@@ -927,29 +951,176 @@ static int add_nested(struct image_writer *outer, unsigned field,
 	return image_writer_field_bytes(outer, field, inner->data, inner->len);
 }
 
-static int build_itimer(struct image_writer *message)
+static int ns_to_usec(uint64_t ns, uint64_t *sec, uint64_t *usec)
 {
-	return image_writer_field_varint(message, 1, 0) ||
-		image_writer_field_varint(message, 2, 0) ||
-		image_writer_field_varint(message, 3, 0) ||
-		image_writer_field_varint(message, 4, 0);
+	if (ns % 1000U)
+		return -1;
+	*sec = ns / 1000000000U;
+	*usec = (ns % 1000000000U) / 1000U;
+	return 0;
 }
 
-static int build_timers(struct image_writer *message)
+static int build_itimer_values(uint64_t interval_ns, uint64_t remaining_ns,
+			       struct image_writer *message)
+{
+	uint64_t isec, iusec, vsec, vusec;
+
+	if (ns_to_usec(interval_ns, &isec, &iusec) ||
+	    ns_to_usec(remaining_ns, &vsec, &vusec))
+		return -1;
+	return image_writer_field_varint(message, 1, isec) ||
+		image_writer_field_varint(message, 2, iusec) ||
+		image_writer_field_varint(message, 3, vsec) ||
+		image_writer_field_varint(message, 4, vusec);
+}
+
+static int build_posix_timers(const struct snapshot_model *model,
+			      struct image_writer *message);
+
+static int build_timers(const struct snapshot_model *model,
+			struct image_writer *message)
 {
 	struct image_writer timer;
+	uint64_t values[6] = { 0 };
+	size_t off;
+	unsigned i;
 	int ret;
 
-	image_writer_init(&timer);
-	ret = build_itimer(&timer);
-	if (!ret)
-		ret = add_nested(message, 1, &timer);
-	if (!ret)
-		ret = add_nested(message, 2, &timer);
-	if (!ret)
-		ret = add_nested(message, 3, &timer);
-	image_writer_free(&timer);
+	if (!model->signal_timers)
+		return build_itimer_values(0, 0, message) ||
+			build_itimer_values(0, 0, message) ||
+			build_itimer_values(0, 0, message);
+	if (!model->itimers.data ||
+	    model->itimers.len != CRIU_SNAPSHOT_ITIMER_HEADER_SIZE +
+		    CRIU_SNAPSHOT_ITIMER_COUNT * CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE)
+		return -1;
+	for (i = 0; i < CRIU_SNAPSHOT_ITIMER_COUNT; i++) {
+		off = CRIU_SNAPSHOT_ITIMER_HEADER_SIZE +
+			(size_t)i * CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE;
+		values[(i * 2)] = u64(model->itimers.data + off + 8);
+		values[(i * 2) + 1] = u64(model->itimers.data + off + 16);
+	}
+	for (i = 0; i < CRIU_SNAPSHOT_ITIMER_COUNT; i++) {
+		image_writer_init(&timer);
+		ret = build_itimer_values(values[i * 2], values[i * 2 + 1], &timer);
+		if (!ret)
+			ret = add_nested(message, i + 1U, &timer);
+		image_writer_free(&timer);
+		if (ret)
+			return ret;
+	}
+	if (model->signal_timers)
+		ret = build_posix_timers(model, message);
 	return ret;
+}
+
+static int build_signal_queue(const struct snapshot_model *model,
+			      uint32_t scope, uint32_t owner,
+			      struct image_writer *message)
+{
+	size_t i;
+	int found = 0;
+
+	for (i = 0; i < model->signal_queues.count; i++) {
+		const struct blob_ref *blob = &model->signal_queues.items[i];
+		const uint8_t *queue = blob->data;
+		uint32_t count;
+		uint32_t j;
+
+		if (u32(queue + 4) != scope || u32(queue + 8) != owner)
+			continue;
+		if (blob->len < CRIU_SNAPSHOT_SIGNAL_QUEUE_HEADER_SIZE)
+			return -1;
+		count = u32(queue + 20);
+		for (j = 0; j < count; j++) {
+			struct image_writer siginfo;
+			size_t entry = CRIU_SNAPSHOT_SIGNAL_QUEUE_HEADER_SIZE +
+				(size_t)j * CRIU_SNAPSHOT_SIGNAL_QUEUE_ENTRY_SIZE;
+
+			image_writer_init(&siginfo);
+			if (image_writer_field_bytes(&siginfo, 1,
+					queue + entry + 8, CRIU_SNAPSHOT_SIGINFO_SIZE) ||
+			    add_nested(message, 1, &siginfo)) {
+				image_writer_free(&siginfo);
+				return -1;
+			}
+			image_writer_free(&siginfo);
+		}
+		found = 1;
+	}
+	return found ? 0 : -1;
+}
+
+static int build_sigactions(const struct snapshot_model *model,
+			    struct image_writer *message)
+{
+	const uint8_t *data = model->sigactions.data;
+	unsigned i;
+
+	if (!data || model->sigactions.len != CRIU_SNAPSHOT_SIGACTION_HEADER_SIZE +
+		    CRIU_SNAPSHOT_SIGACTION_COUNT * CRIU_SNAPSHOT_SIGACTION_ENTRY_SIZE)
+		return -1;
+	for (i = 0; i < CRIU_SNAPSHOT_SIGACTION_COUNT; i++) {
+		size_t off = CRIU_SNAPSHOT_SIGACTION_HEADER_SIZE +
+			(size_t)i * CRIU_SNAPSHOT_SIGACTION_ENTRY_SIZE;
+		uint32_t signo = u32(data + off);
+		struct image_writer sa;
+
+		if (signo == 9 || signo == 19)
+			continue;
+		image_writer_init(&sa);
+		if (image_writer_field_varint(&sa, 1, u64(data + off + 8)) ||
+		    image_writer_field_varint(&sa, 2, u64(data + off + 16)) ||
+		    image_writer_field_varint(&sa, 3, u64(data + off + 24)) ||
+		    image_writer_field_varint(&sa, 4, u64(data + off + 32)) ||
+		    (u64(data + off + 40) &&
+		     image_writer_field_varint(&sa, 6, u64(data + off + 40))) ||
+		    add_nested(message, 15, &sa)) {
+			image_writer_free(&sa);
+			return -1;
+		}
+		image_writer_free(&sa);
+	}
+	return 0;
+}
+
+static int build_posix_timers(const struct snapshot_model *model,
+			      struct image_writer *message)
+{
+	const uint8_t *data = model->posix_timers.data;
+	uint32_t count;
+	uint32_t i;
+
+	if (!data || model->posix_timers.len < CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE)
+		return -1;
+	count = u32(data + 4);
+	for (i = 0; i < count; i++) {
+		size_t off = CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE +
+			(size_t)i * CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE;
+		struct image_writer timer;
+		uint64_t interval_ns = u64(data + off + 40);
+		uint64_t remaining_ns = u64(data + off + 48);
+
+		image_writer_init(&timer);
+		if (image_writer_field_varint(&timer, 1, u32(data + off)) ||
+		    image_writer_field_varint(&timer, 2, u32(data + off + 4)) ||
+		    image_writer_field_varint(&timer, 3, u32(data + off + 8)) ||
+		    image_writer_field_varint(&timer, 4, u32(data + off + 12)) ||
+		    image_writer_field_varint(&timer, 5, u64(data + off + 32)) ||
+		    image_writer_field_varint(&timer, 6, u32(data + off + 20)) ||
+		    image_writer_field_varint(&timer, 7, interval_ns / 1000000000U) ||
+		    image_writer_field_varint(&timer, 8, interval_ns % 1000000000U) ||
+		    image_writer_field_varint(&timer, 9, remaining_ns / 1000000000U) ||
+		    image_writer_field_varint(&timer, 10, remaining_ns % 1000000000U) ||
+		    ((u32(data + off + 16) & CRIU_SNAPSHOT_POSIX_TIMER_F_HAS_NOTIFY_TID) &&
+		     image_writer_field_varint(&timer, 11, u32(data + off + 24))) ||
+		    add_nested(message, 4, &timer)) {
+			image_writer_free(&timer);
+			return -1;
+		}
+		image_writer_free(&timer);
+	}
+	return 0;
 }
 
 static int build_rlimits(const struct blob_ref *task,
@@ -1016,6 +1187,7 @@ static int build_task_core(const struct snapshot_model *model,
 {
 	struct image_writer timers;
 	struct image_writer rlimits;
+	struct image_writer shared_pending;
 	uint64_t blocked = task_field_u64(&model->task, 48);
 	int ret;
 	unsigned sig;
@@ -1023,6 +1195,7 @@ static int build_task_core(const struct snapshot_model *model,
 
 	image_writer_init(&timers);
 	image_writer_init(&rlimits);
+	image_writer_init(&shared_pending);
 	image_writer_init(&sa);
 	ret = image_writer_field_varint(message, 1, 1) ||
 		image_writer_field_varint(message, 2, 0) ||
@@ -1032,19 +1205,30 @@ static int build_task_core(const struct snapshot_model *model,
 		image_writer_field_varint(message, 5, blocked) ||
 		image_writer_field_bytes(message, 6, comm, strlen(comm));
 	if (!ret)
-		ret = build_timers(&timers);
+		ret = build_timers(model, &timers);
 	if (!ret)
 		ret = add_nested(message, 7, &timers);
 	if (!ret)
 		ret = build_rlimits(&model->task, &rlimits);
 	if (!ret && rlimits.len)
 		ret = add_nested(message, 8, &rlimits);
-	if (!ret)
-		ret = image_writer_field_bytes(message, 10, NULL, 0);
+	if (!ret) {
+		if (model->signal_timers) {
+			ret = build_signal_queue(model,
+				CRIU_SNAPSHOT_SIGNAL_SCOPE_SHARED, 0,
+				&shared_pending);
+			if (!ret)
+				ret = add_nested(message, 10, &shared_pending);
+		} else {
+			ret = image_writer_field_bytes(message, 10, NULL, 0);
+		}
+	}
 	/* A core image with no repeated sigactions makes CRIU fall back to the
 	 * legacy sigacts-$pid.img stream. A3 does not emit that stream, so encode
 	 * the complete default disposition table directly in task_core. */
-	for (sig = 0; !ret && sig < 62; sig++) {
+	if (!ret && model->signal_timers)
+		ret = build_sigactions(model, message);
+	for (sig = 0; !ret && !model->signal_timers && sig < 62; sig++) {
 		sa.len = 0;
 		ret = image_writer_field_varint(&sa, 1, 0) ||
 			image_writer_field_varint(&sa, 2, 0) ||
@@ -1055,6 +1239,7 @@ static int build_task_core(const struct snapshot_model *model,
 	if (!ret)
 		ret = image_writer_field_sint64(message, 14, 0);
 	image_writer_free(&sa);
+	image_writer_free(&shared_pending);
 	image_writer_free(&timers);
 	image_writer_free(&rlimits);
 	return ret;
@@ -1074,15 +1259,21 @@ static int build_thread_core(const struct snapshot_model *model,
 {
 	struct image_writer sas;
 	struct image_writer creds;
+	struct image_writer private_pending;
 	uint64_t blocked;
+	uint32_t tid;
 	int ret;
 
 	image_writer_init(&sas);
 	image_writer_init(&creds);
+	image_writer_init(&private_pending);
 	blocked = task_field_u64(&model->task, 48);
+	tid = model->pid;
 
-	if (thread_record && thread_record->len >= 24U)
+	if (thread_record && thread_record->len >= 24U) {
 		blocked = u64(thread_record->data + 24);
+		tid = u32(thread_record->data);
+	}
 	ret = image_writer_field_varint(message, 1, 0) ||
 		image_writer_field_varint(message, 2, 0) ||
 		image_writer_field_sint64(message, 3, 0) ||
@@ -1092,8 +1283,17 @@ static int build_thread_core(const struct snapshot_model *model,
 		ret = build_sas(&sas);
 	if (!ret)
 		ret = add_nested(message, 7, &sas);
-	if (!ret)
-		ret = image_writer_field_bytes(message, 9, NULL, 0);
+	if (!ret) {
+		if (model->signal_timers) {
+			ret = build_signal_queue(model,
+				CRIU_SNAPSHOT_SIGNAL_SCOPE_PRIVATE, tid,
+				&private_pending);
+			if (!ret)
+				ret = add_nested(message, 9, &private_pending);
+		} else {
+			ret = image_writer_field_bytes(message, 9, NULL, 0);
+		}
+	}
 	if (!ret)
 		ret = build_creds(&model->creds, &creds);
 	if (!ret)
@@ -1108,6 +1308,7 @@ static int build_thread_core(const struct snapshot_model *model,
 		ret = image_writer_field_varint(message, 17, 50000);
 	image_writer_free(&sas);
 	image_writer_free(&creds);
+	image_writer_free(&private_pending);
 	return ret;
 }
 

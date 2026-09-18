@@ -12,24 +12,6 @@
 
 #define CRIU_SNAPSHOT_UNSUPPORTED (-EOPNOTSUPP)
 
-static bool has_signal_handlers(struct sighand_struct *sighand)
-{
-	int i;
-
-	if (!sighand)
-		return true;
-	for (i = 0; i < _NSIG; i++)
-		if (sighand->action[i].sa.sa_handler != SIG_DFL)
-			return true;
-	return false;
-}
-
-static bool has_timers(struct signal_struct *sig)
-{
-	/* posix_timers is the kernel's task-owned timer list on 5.10. */
-	return !sig || !list_empty(&sig->posix_timers);
-}
-
 int criu_dump_task(struct task_struct *task,
 			struct criu_snapshot_writer *writer)
 {
@@ -42,23 +24,6 @@ int criu_dump_task(struct task_struct *task,
 
 	if (!task || !writer)
 		return -EINVAL;
-	if (task->signal && task->signal->nr_threads == 1 &&
-	    task->sighand && has_signal_handlers(task->sighand)) {
-		pr_info("criu_dump_task: reject signal handlers pid=%d\n",
-			task_pid_vnr(task));
-		return -EOPNOTSUPP;
-	}
-	if (task->signal && task->signal->nr_threads == 1 &&
-	    task->sighand && has_timers(task->signal)) {
-		pr_info("criu_dump_task: reject timers pid=%d\n", task_pid_vnr(task));
-		return -EOPNOTSUPP;
-	}
-	if (signal_pending(task) || (task->pending.signal.sig[0])) {
-		pr_info("criu_dump_task: reject pending signal pid=%d pending=%lx\n",
-			task_pid_vnr(task), task->pending.signal.sig[0]);
-		return -EOPNOTSUPP;
-	}
-
 	memset(&rec, 0, sizeof(rec));
 	rec.pid = task_pid_nr(task);
 	rec.tgid = task_tgid_nr(task);

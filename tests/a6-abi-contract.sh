@@ -17,6 +17,17 @@ if [[ "${1:-}" == "--kernel-contract" ]]; then
 	exit 0
 fi
 
+if [[ "${1:-}" == "--timer-locks" ]]; then
+	timers="$root_dir/kernel_module/checkpoint/dump_timers.c"
+	test -s "$timers"
+	rg -q 'spin_lock_irqsave\(&timer->it_lock' "$timers"
+	rg -q 'spin_lock\(&leader->sighand->siglock' "$timers"
+	! awk '/spin_lock_irqsave\(&leader->sighand->siglock/,/spin_unlock_irqrestore\(&timer->it_lock/ { if (/it_lock/) exit 1 }' "$timers"
+	test -s "$root_dir/tests/progs/timers.c"
+	echo 'A6_TIMER_LOCKS: PASS'
+	exit 0
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
