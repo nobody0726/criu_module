@@ -3,6 +3,20 @@ set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
 bin="$root_dir/userspace/criu-module-convert/criu-module-convert"
+
+if [[ "${1:-}" == "--kernel-contract" ]]; then
+	signals="$root_dir/kernel_module/checkpoint/dump_signals.c"
+	test -s "$signals"
+	rg -q 'spin_lock_irqsave' "$signals"
+	rg -q 'spin_unlock_irqrestore' "$signals"
+	! rg -q 'kernel_write' "$signals"
+	! awk '/spin_lock_irqsave/,/spin_unlock_irqrestore/ { if (/criu_snapshot_writer_record/) exit 1 }' "$signals"
+	test -s "$root_dir/tests/progs/sig-handlers.c"
+	test -s "$root_dir/tests/progs/sig-pending.c"
+	echo 'A6_KERNEL_CONTRACT: PASS'
+	exit 0
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
