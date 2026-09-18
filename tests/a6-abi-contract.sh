@@ -49,6 +49,8 @@ test "$rc" -eq 4
 test "$rc" -eq 4
 "$bin" "$tmp/a6-record-without-flag.bin" -D "$tmp/no-flag-images"; rc=$?
 test "$rc" -eq 4
+"$bin" "$tmp/a6-bad-notify-tid.bin" -D "$tmp/bad-notify-images"; rc=$?
+test "$rc" -eq 4
 "$bin" "$tmp/a6-unknown-mandatory.bin" -D "$tmp/unknown-images"; rc=$?
 test "$rc" -eq 1
 set -e
@@ -59,5 +61,6 @@ test ! -e "$tmp/gap-images"
 test ! -e "$tmp/bad-siginfo-images"
 test ! -e "$tmp/unknown-header-images"
 test ! -e "$tmp/no-flag-images"
+test ! -e "$tmp/bad-notify-images"
 test ! -e "$tmp/unknown-images"
 echo 'A6_ABI_CONTRACT: PASS'

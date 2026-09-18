@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <stdio.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t handled;
@@ -34,6 +35,14 @@ int main(void)
 		return 1;
 	if (signal(SIGTERM, SIG_IGN) == SIG_ERR)
 		return 1;
-	for (;;)
+	printf("pid=%ld\n", (long)getpid());
+	fflush(stdout);
+	for (;;) {
 		pause();
+		if (handled == SIGUSR1) {
+			puts("handler=PASS");
+			fflush(stdout);
+			handled = 0;
+		}
+	}
 }

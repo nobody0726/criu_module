@@ -52,6 +52,14 @@ def posix_timers():
     return struct.pack("<IIII", 1, 0, 56, 0)
 
 
+def posix_timer_with_target(tid):
+    header = struct.pack("<IIII", 1, 1, 56, 0)
+    entry = struct.pack(
+        "<IIIIIIIIQQQ", 1, 1, 10, 4, 2, 0, tid, 0, 0, 0, 0
+    )
+    return header + entry
+
+
 def build(records, flags=A6_FLAG):
     body = b"".join(tlv(kind, payload) for kind, payload in records)
     body += tlv(END, b"")
@@ -102,6 +110,10 @@ def main(out_dir):
     )
     (out / "a6-unknown-header-flag.bin").write_bytes(build(valid_records(), flags=2))
     (out / "a6-record-without-flag.bin").write_bytes(build(valid_records(), flags=0))
+    (out / "a6-bad-notify-tid.bin").write_bytes(
+        build([r if r[0] != POSIX_TIMERS else
+               (r[0], posix_timer_with_target(9999)) for r in records])
+    )
 
 
 if __name__ == "__main__":

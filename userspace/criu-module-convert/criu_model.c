@@ -716,6 +716,49 @@ static int copy_fixed_string(char *out, size_t out_size,
 	return 0;
 }
 
+static bool model_has_tid(const struct snapshot_model *model, uint32_t tid)
+{
+	size_t i;
+
+	if (tid == model->pid)
+		return true;
+	for (i = 0; i < model->threads.count; i++)
+		if (u32(model->threads.items[i].data) == tid)
+			return true;
+	return false;
+}
+
+static int validate_a6_model(const struct snapshot_model *model)
+{
+	size_t i;
+	uint32_t count;
+
+	if (!model->sigactions.data || !model->itimers.data ||
+	    !model->posix_timers.data || !model->signal_queues.count)
+		return SNAPSHOT_READER_FORMAT_ERROR;
+	for (i = 0; i < model->signal_queues.count; i++) {
+		const uint8_t *queue = model->signal_queues.items[i].data;
+		uint32_t scope = u32(queue + 4);
+		uint32_t owner = u32(queue + 8);
+
+		if (scope == CRIU_SNAPSHOT_SIGNAL_SCOPE_PRIVATE &&
+		    !model_has_tid(model, owner))
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	}
+	count = u32(model->posix_timers.data + 4);
+	for (i = 0; i < count; i++) {
+		const uint8_t *timer = model->posix_timers.data +
+			CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE +
+			i * CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE;
+		uint32_t flags = u32(timer + 16);
+
+		if ((flags & CRIU_SNAPSHOT_POSIX_TIMER_F_HAS_NOTIFY_TID) &&
+		    !model_has_tid(model, u32(timer + 24)))
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	}
+	return 0;
+}
+
 static int validate_model(const struct snapshot_model *model)
 {
 	size_t i, j;
@@ -724,6 +767,12 @@ static int validate_model(const struct snapshot_model *model)
 
 	if (!model->task.data)
 		return 0;
+	if (model->signal_timers) {
+		int a6_ret = validate_a6_model(model);
+
+		if (a6_ret)
+			return a6_ret;
+	}
 	if (!model->mm.data && !model->regs.data && !model->fs.data &&
 		!model->creds.data && !model->fds.count && !model->vmas.count &&
 		!model->pages.count && !model->threads.count)
@@ -953,8 +1002,6 @@ static int add_nested(struct image_writer *outer, unsigned field,
 
 static int ns_to_usec(uint64_t ns, uint64_t *sec, uint64_t *usec)
 {
-	if (ns % 1000U)
-		return -1;
 	*sec = ns / 1000000000U;
 	*usec = (ns % 1000000000U) / 1000U;
 	return 0;
@@ -2592,12 +2639,12 @@ int criu_emit_images(const struct snapshot_document *doc,
 	} else if (errno != ENOENT) {
 		return SNAPSHOT_READER_IO_ERROR;
 	}
-	if (len > PATH_MAX - 24U)
+	if (len > PATH_MAX - 32U)
 		return SNAPSHOT_READER_IO_ERROR;
-	tmp = malloc(len + 24U);
+	tmp = malloc(len + 32U);
 	if (!tmp)
 		return SNAPSHOT_READER_IO_ERROR;
-	snprintf(tmp, len + 24U, "%s.a5-tmp.XXXXXX", options->output_dir);
+	snprintf(tmp, len + 32U, "%s.criu-module-tmp.XXXXXX", options->output_dir);
 	if (!mkdtemp(tmp)) {
 		free(tmp);
 		return SNAPSHOT_READER_IO_ERROR;

@@ -218,7 +218,8 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 	    (header_flags & ~CRIU_SNAPSHOT_HEADER_KNOWN_FLAGS) ||
 	    le32(doc->data+44)!=0)
 		goto format_error;
-	if(le64(doc->data+48)!=doc->size||le64(doc->data+48)>CRIU_SNAPSHOT_MAX_TOTAL_SIZE)return SNAPSHOT_READER_FORMAT_ERROR;
+	if(le64(doc->data+48)!=doc->size||le64(doc->data+48)>CRIU_SNAPSHOT_MAX_TOTAL_SIZE)
+		goto format_error;
 	expected=le64(doc->data+56); memset(doc->data+56,0,8); sha_init(&sha); sha_update(&sha,doc->data,doc->size-CRIU_SNAPSHOT_FOOTER_SIZE); sha_final(&sha,digest); memcpy(doc->data+56,&expected,8);
 	if(le64(digest)!=expected)return SNAPSHOT_READER_FORMAT_ERROR;
 	groups = calloc(CRIU_SNAPSHOT_MAX_RECORDS, sizeof(*groups));

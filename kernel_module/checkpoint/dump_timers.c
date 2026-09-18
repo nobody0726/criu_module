@@ -38,8 +38,9 @@ static void capture_itimers(struct task_struct *task,
 	entries[0].interval_ns = ktime_to_ns(signal->it_real_incr);
 	entries[0].remaining_ns = remaining_real_ns(signal);
 	for (i = 0; i < 2; i++) {
-		struct cpu_itimer *timer = &signal->it[i];
-		unsigned int kind = i == CPUCLOCK_VIRT ?
+		unsigned int source = i == 0 ? CPUCLOCK_VIRT : CPUCLOCK_PROF;
+		struct cpu_itimer *timer = &signal->it[source];
+		unsigned int kind = source == CPUCLOCK_VIRT ?
 			CRIU_SNAPSHOT_ITIMER_VIRTUAL : CRIU_SNAPSHOT_ITIMER_PROF;
 
 		entries[i + 1].kind = kind;
@@ -52,10 +53,10 @@ static void capture_itimers(struct task_struct *task,
 				atomic64_read(&signal->cputimer.cputime_atomic.stime);
 			samples[CPUCLOCK_VIRT] =
 				atomic64_read(&signal->cputimer.cputime_atomic.utime);
-			if (value <= samples[i])
+			if (value <= samples[source])
 				value = TICK_NSEC;
 			else
-				value -= samples[i];
+				value -= samples[source];
 			entries[i + 1].remaining_ns = value;
 		}
 	}

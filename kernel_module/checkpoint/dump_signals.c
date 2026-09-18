@@ -220,6 +220,17 @@ int criu_collect_signals(struct criu_freeze_ctx *ctx,
 		if (ret)
 			goto fail;
 	}
+	for (i = 2; i < capture->queue_count; i++) {
+		struct criu_signal_queue_chunk item = capture->queues[i];
+		unsigned int j = i;
+
+		while (j > 1 &&
+		       capture->queues[j - 1].owner_tid > item.owner_tid) {
+			capture->queues[j] = capture->queues[j - 1];
+			j--;
+		}
+		capture->queues[j] = item;
+	}
 	return 0;
 fail:
 	criu_release_signals(capture);

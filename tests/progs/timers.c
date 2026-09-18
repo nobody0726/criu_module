@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <stdio.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -20,11 +21,12 @@ int main(void)
 	action.sa_handler = timer_handler;
 	action.sa_flags = 0;
 	action.sa_restorer = 0;
-	if (sigaction(SIGALRM, &action, 0) < 0)
+	if (sigaction(SIGALRM, &action, 0) < 0 ||
+	    sigaction(SIGRTMIN, &action, 0) < 0)
 		return 1;
-	interval.it_interval.tv_sec = 1;
+	interval.it_interval.tv_sec = 3;
 	interval.it_interval.tv_usec = 0;
-	interval.it_value.tv_sec = 1;
+	interval.it_value.tv_sec = 3;
 	interval.it_value.tv_usec = 0;
 	if (setitimer(ITIMER_REAL, &interval, 0) < 0)
 		return 1;
@@ -35,10 +37,15 @@ int main(void)
 		return 1;
 	spec.it_interval.tv_sec = 2;
 	spec.it_interval.tv_nsec = 0;
-	spec.it_value.tv_sec = 1;
+	spec.it_value.tv_sec = 3;
 	spec.it_value.tv_nsec = 0;
 	if (timer_settime(timer, 0, &spec, 0) < 0)
 		return 1;
-	for (;;)
+	printf("pid=%ld\n", (long)getpid());
+	fflush(stdout);
+	for (;;) {
 		pause();
+		puts("timer=PASS");
+		fflush(stdout);
+	}
 }
