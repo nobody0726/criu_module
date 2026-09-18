@@ -401,7 +401,7 @@ zdtm/static/socket-tcp   # 预期失败,A5 不做 TCP
 guest 输出 `A5_CROSS_RESTORE: PASS`、`A5_UNSUPPORTED: PASS`、
 `A3_CROSS_RESTORE: PASS`、`A4_CROSS_RESTORE: PASS` 和
 `A5_REGRESSION: PASS`。恢复后行为与第二次响应均已验证，guest dmesg 无
-KASAN/lockdep/oops。代码保留在 `codex/a5-fds`，尚未合并或推送。
+KASAN/lockdep/oops。代码已合并到本地 `main`，并随本次发布推送到远程 `main`。
 详见 [验证记录](../plans/2026-09-18-a5-verification.md)。
 
 以下不是 A5 完成条件，必须记录为后续扩展：listener、pathname-bound、datagram、

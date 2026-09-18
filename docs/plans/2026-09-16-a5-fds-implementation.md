@@ -198,4 +198,4 @@ Lima 构建与最终 A3/A4 guest 回归全部通过。全量 ZDTM/GitHub CI 仍�
   “THREAD 是最后一种记录”的断言随 A5 范围更新。
 - worktree 不复制 upstream checkout；`CRIU_SOURCE` 让 QEMU staging 复用主仓库
   已构建 CRIU 和 Python decoder。临时 `criu-bin` 不进入提交。
-- 本次只提交 `codex/a5-fds`；合并和远程发布不属于本次执行动作。
+- 实现最初在 `codex/a5-fds` 完成；随后已快进合并到本地 `main` 并推送远程 `main`。

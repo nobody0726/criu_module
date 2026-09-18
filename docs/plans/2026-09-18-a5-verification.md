@@ -28,7 +28,7 @@ guest-local `/tmp`。使用 guest 内 dmesg 检查 KASAN/lockdep/oops。
 
 最终 guest 内 dmesg 未出现 BUG/WARNING/Oops、KASAN、lockdep 或 atomic-sleep
 错误；QEMU 退出状态为 0。独立只读代码审查报告的发布阻塞项已处理并复审。
-Task 1–8 已达到本轮确认范围；保留本地 A5 分支，尚未合并或推送。
+Task 1–8 已达到本轮确认范围；代码已快进合并到本地 `main`，并推送远程 `main`。
 
 17 个拒绝用例：fown、deleted、clone-files、thread-files、listener、pathname、
 dgram、seqpacket、rights、credentials、passcred、fifo、packet-pipe、lock、
