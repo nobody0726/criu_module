@@ -12,8 +12,10 @@
 #include "dump.h"
 #include "dump_files.h"
 #include "dump_mm.h"
+#include "dump_signals.h"
 #include "dump_task.h"
 #include "dump_threads.h"
+#include "dump_timers.h"
 #include "snapshot_writer.h"
 
 static int dump_revalidate(struct task_struct *task, u64 generation,
@@ -52,6 +54,9 @@ int criu_dump_process(pid_t vpid, const char *path)
 	struct criu_snapshot_header header;
 	struct criu_snapshot_writer writer;
 	struct criu_freeze_ctx *freeze_ctx = NULL;
+	struct criu_freeze_task_view frozen_view;
+	unsigned int frozen_count;
+	u64 frozen_generation;
 	u64 generation;
 	int ret, thaw_ret;
 	bool opened = false;
@@ -84,6 +89,15 @@ int criu_dump_process(pid_t vpid, const char *path)
 	pr_info("criu_dump: freeze pid=%d ret=%d ctx=%p\n", vpid, ret, freeze_ctx);
 	if (ret)
 		goto out;
+	ret = criu_freeze_task_count(freeze_ctx, &frozen_count);
+	if (!ret && (!frozen_count ||
+		     criu_freeze_task_get(freeze_ctx, 0, &frozen_view) ||
+		     criu_freeze_generation(freeze_ctx, &frozen_generation) ||
+		     frozen_generation != generation ||
+		     frozen_view.tid != task_pid_vnr(task)))
+		ret = -EAGAIN;
+	if (ret)
+		goto thaw;
 
 	memset(&header, 0, sizeof(header));
 	header.magic = CRIU_SNAPSHOT_MAGIC;

@@ -378,6 +378,55 @@ bool criu_freeze_settled(struct criu_freeze_ctx *ctx)
 	return settled;
 }
 
+int criu_freeze_task_count(struct criu_freeze_ctx *ctx, unsigned int *count)
+{
+	if (!ctx || !count)
+		return -EINVAL;
+	mutex_lock(&criu_freeze_lock);
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FROZEN_SETTLED) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	*count = ctx->task_count;
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
+}
+
+int criu_freeze_task_get(struct criu_freeze_ctx *ctx, unsigned int index,
+			 struct criu_freeze_task_view *view)
+{
+	if (!ctx || !view)
+		return -EINVAL;
+	mutex_lock(&criu_freeze_lock);
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FROZEN_SETTLED ||
+	    index >= ctx->task_count) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	view->task = ctx->tasks[index].task;
+	view->tid = ctx->tasks[index].tid;
+	view->stopped = ctx->tasks[index].stopped;
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
+}
+
+int criu_freeze_generation(struct criu_freeze_ctx *ctx, u64 *generation)
+{
+	if (!ctx || !generation)
+		return -EINVAL;
+	mutex_lock(&criu_freeze_lock);
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FROZEN_SETTLED) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	*generation = ctx->target_generation;
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
+}
+
 int criu_freeze_status(struct criu_freeze_status *out)
 {
 	struct criu_freeze_ctx *ctx;

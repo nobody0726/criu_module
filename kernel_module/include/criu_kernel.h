@@ -77,6 +77,14 @@ struct criu_freeze_ctx;
 struct criu_objmap;
 struct file;
 
+/* Borrowed view into the A2-pinned task set. The task reference remains owned
+ * by the freeze context; callers must not retain this view past criu_thaw(). */
+struct criu_freeze_task_view {
+	struct task_struct *task;
+	pid_t tid;
+	bool stopped;
+};
+
 struct criu_freeze_status {
 	char state[16];
 	u64 generation;
@@ -105,6 +113,11 @@ int criu_freeze(pid_t vpid, bool include_children,
 		struct criu_freeze_ctx **ctx);
 int criu_thaw(struct criu_freeze_ctx *ctx);
 bool criu_freeze_settled(struct criu_freeze_ctx *ctx);
+int criu_freeze_task_count(struct criu_freeze_ctx *ctx,
+			   unsigned int *count);
+int criu_freeze_task_get(struct criu_freeze_ctx *ctx, unsigned int index,
+			 struct criu_freeze_task_view *view);
+int criu_freeze_generation(struct criu_freeze_ctx *ctx, u64 *generation);
 int criu_freeze_status(struct criu_freeze_status *out);
 int criu_collect_mm_info(struct task_struct *task, struct criu_mm_info *out);
 int criu_walk_vmas(struct task_struct *task, criu_vma_info_fn fn, void *arg);
