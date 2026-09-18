@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+import hashlib
+import pathlib
+import struct
+import sys
+
+MAGIC = 0x43524955534E5033
+VERSION = 1
+HEADER = 64
+FOOTER = 24
+A6_FLAG = 1
+
+SIGACTION = 15
+SIGNAL_QUEUE = 16
+ITIMERS = 17
+POSIX_TIMERS = 18
+END = 0xFFFF
+
+
+def checksum(blob):
+    return int.from_bytes(hashlib.sha256(blob).digest()[:8], "little")
+
+
+def tlv(kind, payload):
+    return struct.pack("<HHIQ", kind, 0, 0, len(payload)) + payload
+
+
+def sigactions():
+    header = struct.pack("<IIII", 1, 64, 48, 0)
+    entries = b"".join(
+        struct.pack("<IIQQQQQ", signo, 0, 0, 0, 0, 0, 0)
+        for signo in range(1, 65)
+    )
+    return header + entries
+
+
+def queue(scope, owner, total=1, first=0, count=1, mask=1):
+    header = struct.pack(
+        "<IIIIIIIIQQ", 1, scope, owner, total, first, count, 136, 128, mask, 0
+    )
+    entry = struct.pack("<II", 10, 0) + struct.pack("<i", 10) + bytes(124)
+    return header + entry * count
+
+
+def itimers():
+    header = struct.pack("<IIII", 1, 3, 24, 0)
+    entries = b"".join(struct.pack("<IIQQ", kind, 0, 0, 0) for kind in (1, 2, 3))
+    return header + entries
+
+
+def posix_timers():
+    return struct.pack("<IIII", 1, 0, 56, 0)
+
+
+def build(records, flags=A6_FLAG):
+    body = b"".join(tlv(kind, payload) for kind, payload in records)
+    body += tlv(END, b"")
+    total = HEADER + len(body) + FOOTER
+    head0 = struct.pack(
+        "<QIHHIIIIQIIQQ",
+        MAGIC, VERSION, HEADER, flags, 0x3E, 4096, 1234, 1234,
+        7, len(records) + 1, 0, total, 0,
+    )
+    digest = checksum(head0 + body)
+    head = head0[:-8] + struct.pack("<Q", digest)
+    footer = struct.pack("<QIIQ", MAGIC, VERSION, len(records) + 1, digest)
+    return head + body + footer
+
+
+def valid_records():
+    return [
+        (1, b"a6-fixture"),
+        (SIGACTION, sigactions()),
+        (SIGNAL_QUEUE, queue(1, 0)),
+        (SIGNAL_QUEUE, queue(2, 1234)),
+        (ITIMERS, itimers()),
+        (POSIX_TIMERS, posix_timers()),
+    ]
+
+
+def main(out_dir):
+    out = pathlib.Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "a6-valid.bin").write_bytes(build(valid_records()))
+    records = valid_records()
+    (out / "a6-missing.bin").write_bytes(build([r for r in records if r[0] != ITIMERS]))
+    (out / "a6-duplicate.bin").write_bytes(build(records + [(ITIMERS, itimers())]))
+    bad_queue = queue(2, 1234, total=3, first=2, count=1)
+    (out / "a6-queue-gap.bin").write_bytes(
+        build([r for r in records if r[0] != SIGNAL_QUEUE]
+              + [(SIGNAL_QUEUE, queue(2, 1234, total=3, first=0)),
+                 (SIGNAL_QUEUE, bad_queue)])
+    )
+    bad_siginfo = bytearray(queue(1, 0))
+    struct.pack_into("<I", bad_siginfo, 28, 127)
+    (out / "a6-bad-siginfo.bin").write_bytes(
+        build([r if r[0] != SIGNAL_QUEUE else (r[0], bytes(bad_siginfo))
+               for r in records])
+    )
+    (out / "a6-unknown-mandatory.bin").write_bytes(
+        build([(99, b"unknown")] + records, flags=0)
+    )
+    (out / "a6-unknown-header-flag.bin").write_bytes(build(valid_records(), flags=2))
+    (out / "a6-record-without-flag.bin").write_bytes(build(valid_records(), flags=0))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])
