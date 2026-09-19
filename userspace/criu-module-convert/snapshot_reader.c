@@ -40,7 +40,16 @@ static uint32_t le32(const uint8_t *p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(
 static uint64_t le64(const uint8_t *p){return (uint64_t)le32(p)|(uint64_t)le32(p+4)<<32;}
 static int known_type(uint16_t t)
 {
-	return t >= CRIU_SNAPSHOT_REC_TASK && t <= CRIU_SNAPSHOT_REC_PSTREE;
+	return (t >= CRIU_SNAPSHOT_REC_TASK &&
+		t <= CRIU_SNAPSHOT_REC_SHMEM_PAGE_RUN);
+}
+
+static int signal_timer_type(uint16_t type)
+{
+	return type == CRIU_SNAPSHOT_REC_SIGACTION ||
+	       type == CRIU_SNAPSHOT_REC_SIGNAL_QUEUE ||
+	       type == CRIU_SNAPSHOT_REC_ITIMERS ||
+	       type == CRIU_SNAPSHOT_REC_POSIX_TIMERS;
 }
 
 static int process_scoped_type(uint16_t type)
@@ -63,6 +72,7 @@ static int process_scoped_type(uint16_t type)
 	case CRIU_SNAPSHOT_REC_SIGNAL_QUEUE:
 	case CRIU_SNAPSHOT_REC_ITIMERS:
 	case CRIU_SNAPSHOT_REC_POSIX_TIMERS:
+	case CRIU_SNAPSHOT_REC_TASK_IDS:
 		return 1;
 	default:
 		return 0;
@@ -129,6 +139,14 @@ struct pstree_item {
 	uint32_t flags;
 };
 
+struct task_ids_item {
+	uint32_t pid;
+	uint32_t vm_id;
+	uint32_t files_id;
+	uint32_t fs_id;
+	uint32_t sighand_id;
+};
+
 static int pstree_index(const struct pstree_item *items, size_t count,
 			uint32_t pid)
 {
@@ -170,6 +188,68 @@ static int validate_pstree_table(const struct pstree_item *items, size_t count)
 		}
 	}
 	return root_count == 1;
+}
+
+static int task_ids_index(const struct task_ids_item *items, size_t count,
+			  uint32_t pid)
+{
+	size_t i;
+	for (i = 0; i < count; i++)
+		if (items[i].pid == pid)
+			return (int)i;
+	return -1;
+}
+
+static int validate_task_ids(const uint8_t *p, size_t len, uint32_t owner,
+			     struct task_ids_item *items, size_t *count)
+{
+	struct task_ids_item item;
+
+	if (len != CRIU_SNAPSHOT_TASK_IDS_RECORD_SIZE ||
+	    le32(p) != CRIU_SNAPSHOT_TASK_IDS_VERSION ||
+	    le32(p + 4) != owner ||
+	    !le32(p + 8) || !le32(p + 12) || !le32(p + 16) ||
+	    !le32(p + 20) || le32(p + 24) || le32(p + 28))
+		return 0;
+	if (*count >= CRIU_SNAPSHOT_MAX_RECORDS ||
+	    task_ids_index(items, *count, owner) >= 0)
+		return 0;
+	item.pid = owner;
+	item.vm_id = le32(p + 8);
+	item.files_id = le32(p + 12);
+	item.fs_id = le32(p + 16);
+	item.sighand_id = le32(p + 20);
+	items[(*count)++] = item;
+	return 1;
+}
+
+static int validate_task_ids_table(const struct pstree_item *pstree,
+				   size_t pstree_count,
+				   const struct task_ids_item *task_ids,
+				   size_t task_ids_count,
+				   int *unsupported)
+{
+	size_t i, j;
+
+	if (!task_ids_count)
+		return 1;
+	if (task_ids_count != pstree_count)
+		return 0;
+	for (i = 0; i < pstree_count; i++)
+		if (task_ids_index(task_ids, task_ids_count, pstree[i].pid) < 0)
+			return 0;
+	for (i = 0; i < task_ids_count; i++) {
+		if (pstree_index(pstree, pstree_count, task_ids[i].pid) < 0)
+			return 0;
+		for (j = i + 1; j < task_ids_count; j++) {
+			if (task_ids[i].vm_id == task_ids[j].vm_id) {
+				if (unsupported)
+					*unsupported = 1;
+				return 0;
+			}
+		}
+	}
+	return 1;
 }
 
 struct a6_queue_group {
@@ -339,6 +419,7 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 	struct a6_queue_group *groups = NULL; size_t group_count = 0;
 	struct a6_queue_range *ranges = NULL; size_t range_count = 0;
 	struct pstree_item *pstree = NULL; size_t pstree_count = 0;
+	struct task_ids_item *task_ids = NULL; size_t task_ids_count = 0;
 	if (!path || !doc)
 		return SNAPSHOT_READER_FORMAT_ERROR;
 	memset(doc, 0, sizeof(*doc));
@@ -367,6 +448,9 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 		goto io_error;
 	pstree = calloc(CRIU_SNAPSHOT_MAX_RECORDS, sizeof(*pstree));
 	if (!pstree)
+		goto io_error;
+	task_ids = calloc(CRIU_SNAPSHOT_MAX_RECORDS, sizeof(*task_ids));
+	if (!task_ids)
 		goto io_error;
 	body_end=doc->size-CRIU_SNAPSHOT_FOOTER_SIZE; off=CRIU_SNAPSHOT_HEADER_SIZE;
 	while(off<body_end){
@@ -419,8 +503,7 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 				snapshot_document_free(doc);
 				return SNAPSHOT_READER_UNSUPPORTED;
 			}
-		}else if (type != CRIU_SNAPSHOT_REC_PSTREE &&
-			  type >= CRIU_SNAPSHOT_REC_SIGACTION &&
+		}else if (signal_timer_type(type) &&
 			  !(header_flags & CRIU_SNAPSHOT_F_SIGNAL_TIMERS)) {
 			goto format_error;
 		}else if(type == CRIU_SNAPSHOT_REC_PSTREE) {
@@ -441,6 +524,11 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 			pstree[pstree_count].flags = le32(payload + 4);
 			pstree_count++;
 			has_pstree = 1;
+		}else if(type == CRIU_SNAPSHOT_REC_TASK_IDS) {
+			if (!validate_task_ids(payload, (size_t)len,
+					       process_owner, task_ids,
+					       &task_ids_count))
+				goto format_error;
 		}else if(header_flags & CRIU_SNAPSHOT_F_SIGNAL_TIMERS){
 			switch (type) {
 			case CRIU_SNAPSHOT_REC_SIGACTION:
@@ -479,15 +567,23 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 			if (groups[i].covered != groups[i].total_count)
 				goto format_error;
 	}
-	if ((header_flags & CRIU_SNAPSHOT_F_PSTREE) &&
-	    (!has_pstree || !validate_pstree_table(pstree, pstree_count)))
-		goto format_error;
-	free(pstree); free(ranges); free(groups); doc->record_count=count; return SNAPSHOT_READER_OK;
+	if (header_flags & CRIU_SNAPSHOT_F_PSTREE) {
+		int unsupported = 0;
+		if (!has_pstree || !validate_pstree_table(pstree, pstree_count))
+			goto format_error;
+		if (!validate_task_ids_table(pstree, pstree_count, task_ids,
+					     task_ids_count, &unsupported)) {
+			if (unsupported)
+				goto unsupported_error;
+			goto format_error;
+		}
+	}
+	free(task_ids); free(pstree); free(ranges); free(groups); doc->record_count=count; return SNAPSHOT_READER_OK;
 unsupported_error:
-	free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_UNSUPPORTED;
+	free(task_ids); free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_UNSUPPORTED;
 format_error:
-	free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_FORMAT_ERROR;
+	free(task_ids); free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_FORMAT_ERROR;
 io_error:
-	free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_IO_ERROR;
+	free(task_ids); free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_IO_ERROR;
 }
 void snapshot_document_free(struct snapshot_document *doc){if(doc){free(doc->data);doc->data=NULL;doc->size=0;doc->record_count=0;}}

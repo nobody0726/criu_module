@@ -25,6 +25,9 @@ SIGACTION = 15
 SIGNAL_QUEUE = 16
 ITIMERS = 17
 POSIX_TIMERS = 18
+TASK_IDS = 20
+SHMEM_OBJECT = 21
+SHMEM_PAGE_RUN = 22
 END = 0xFFFF
 
 ROOT = 1
@@ -51,6 +54,14 @@ def pstree(pid, ppid, pgid, sid, flags, born_sid=-1, namespace=1):
 
 def task(pid):
     return struct.pack("<3I", pid, pid, 0)
+
+
+def task_ids(pid, vm_id, files_id, fs_id=None, sighand_id=None, flags=0):
+    if fs_id is None:
+        fs_id = pid
+    if sighand_id is None:
+        sighand_id = pid
+    return struct.pack("<8I", 1, pid, vm_id, files_id, fs_id, sighand_id, flags, 0)
 
 
 def fixed_path(path, size=512):
@@ -136,6 +147,13 @@ def tree_session():
     ]
 
 
+def a8_tree():
+    return [
+        (PSTREE, pstree(400, 0, 400, 400, ROOT | SESSION_LEADER | PGRP_LEADER)),
+        (PSTREE, pstree(401, 400, 400, 400, 0)),
+    ]
+
+
 def main(out_dir):
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -167,15 +185,32 @@ def main(out_dir):
         (PSTREE, pstree(141, 140, 141, 141, SESSION_LEADER | PGRP_LEADER,
                          born_sid=999)),
     ]))
-    scoped = struct.pack("<II", 999, 0) + task(100)
+    scoped_payload = struct.pack("<II", 999, 0) + task(100)
     (out / "a7-owner-mismatch.bin").write_bytes(build([
         (PSTREE, pstree(150, 0, 150, 150, ROOT | SESSION_LEADER | PGRP_LEADER)),
-        (TASK, scoped, SCOPE_FLAG),
+        (TASK, scoped_payload, SCOPE_FLAG),
     ]))
     full = tree_simple() + full_process_records(100, 0) + full_process_records(101, 100)
     (out / "a7-full-multi.bin").write_bytes(
         build(full, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
     )
+    a8_valid = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 77)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 77)),
+    ]
+    (out / "a8-valid-shared-files.bin").write_bytes(build(a8_valid))
+    (out / "a8-duplicate-task-ids.bin").write_bytes(build(
+        a8_valid + [scoped(400, TASK_IDS, task_ids(400, 402, 78))]
+    ))
+    (out / "a8-missing-task-ids.bin").write_bytes(build(
+        a8_tree() + [scoped(400, TASK_IDS, task_ids(400, 400, 77))]
+    ))
+    (out / "a8-nonthread-shared-vm.bin").write_bytes(build(
+        a8_tree() + [
+            scoped(400, TASK_IDS, task_ids(400, 99, 400)),
+            scoped(401, TASK_IDS, task_ids(401, 99, 401)),
+        ]
+    ))
 
 
 if __name__ == "__main__":
