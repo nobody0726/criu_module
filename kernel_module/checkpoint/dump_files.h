@@ -5,6 +5,7 @@
 #include <linux/sched.h>
 #include "../../include/criu_snapshot.h"
 #include "../include/criu_kernel.h"
+#include "dump_shared.h"
 #include "snapshot_writer.h"
 
 #define CRIU_SNAPSHOT_REC_FD 5
@@ -44,6 +45,7 @@ int criu_dump_files(struct task_struct *task,
 int criu_dump_files_process(struct criu_freeze_ctx *ctx,
 			    unsigned int process_index,
 			    const struct criu_freeze_process_view *view,
-			    struct criu_snapshot_writer *writer);
+			    struct criu_snapshot_writer *writer,
+			    struct criu_dump_shared_ctx *shared_ctx);
 
 #endif

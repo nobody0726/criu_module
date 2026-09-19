@@ -7,7 +7,6 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 python3 "$root_dir/tests/fixtures/a6-snapshot-builder.py" "$tmp"
-make -C "$root_dir/userspace/criu-module-convert" clean all >/dev/null
 
 set +e
 "$bin" "$tmp/a6-missing.bin" -D "$tmp/missing"; missing_rc=$?

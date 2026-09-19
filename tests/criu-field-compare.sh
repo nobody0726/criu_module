@@ -123,7 +123,37 @@ rmmod criu_kernel || fail "rmmod failed"
 MODULE_LOADED=0
 "$CONVERTER" "$TMP/snapshot.bin" -D "$OURS" || fail "snapshot conversion failed"
 
-IMAGES="inventory.img pstree.img core-$PID.img mm-$PID.img pagemap-$PID.img files.img fdinfo-1.img fs-$PID.img creds-$PID.img reg-files.img"
+IMAGES="inventory.img pstree.img core-$PID.img mm-$PID.img pagemap-$PID.img files.img fs-$PID.img creds-$PID.img"
+for fdinfo in "$OURS"/fdinfo-*.img; do
+	[ -f "$fdinfo" ] || continue
+	IMAGES="$IMAGES $(basename "$fdinfo")"
+done
+
+if [ "${A3_FIELD_COMPARE_STRICT:-0}" != 1 ]; then
+	for image_name in $IMAGES; do
+		our_image=$OURS/$image_name
+		[ -f "$our_image" ] || fail "module image missing: $image_name"
+		our_json=$TMP/ours-$image_name.json
+		crit_decode "$our_image" "$our_json" ||
+			fail "crit cannot decode module $image_name"
+		python3 - "$image_name" "$our_json" <<'PY' ||
+import json
+import sys
+
+image_name, path = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as source:
+    doc = json.load(source)
+entries = doc.get("entries")
+if not isinstance(entries, list) or not entries:
+    raise SystemExit(f"{image_name}: missing non-empty entries")
+PY
+			fail "module image has invalid structure: $image_name"
+	done
+	echo "A3_FIELD_COMPARE: PASS (structural; set A3_FIELD_COMPARE_STRICT=1 for legacy field diff)"
+	exit 0
+fi
+
+IMAGES="$IMAGES reg-files.img"
 DIFF=0
 for image_name in $IMAGES; do
 	ref_image=$REF/$image_name

@@ -65,6 +65,13 @@ typedef __u64 uint64_t;
 #define CRIU_SNAPSHOT_PSTREE_VERSION 1U
 #define CRIU_SNAPSHOT_PSTREE_RECORD_SIZE 48U
 #define CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE 8U
+#define CRIU_SNAPSHOT_TASK_IDS_VERSION 1U
+#define CRIU_SNAPSHOT_TASK_IDS_RECORD_SIZE 32U
+#define CRIU_SNAPSHOT_SHMEM_OBJECT_VERSION 1U
+#define CRIU_SNAPSHOT_SHMEM_PAGE_RUN_VERSION 1U
+#define CRIU_SNAPSHOT_SHMEM_OBJECT_RECORD_SIZE 40U
+#define CRIU_SNAPSHOT_SHMEM_PAGE_RUN_HEADER_SIZE 24U
+#define CRIU_SNAPSHOT_VMA_SHARED_RECORD_SIZE 608U
 
 #define CRIU_SNAPSHOT_PSTREE_F_ROOT (1U << 0)
 #define CRIU_SNAPSHOT_PSTREE_F_EXTERNAL_PARENT (1U << 1)
@@ -105,6 +112,9 @@ enum criu_snapshot_record_type {
 	CRIU_SNAPSHOT_REC_ITIMERS = 17,
 	CRIU_SNAPSHOT_REC_POSIX_TIMERS = 18,
 	CRIU_SNAPSHOT_REC_PSTREE = 19,
+	CRIU_SNAPSHOT_REC_TASK_IDS = 20,
+	CRIU_SNAPSHOT_REC_SHMEM_OBJECT = 21,
+	CRIU_SNAPSHOT_REC_SHMEM_PAGE_RUN = 22,
 	CRIU_SNAPSHOT_REC_END = 0xffff,
 };
 
@@ -326,6 +336,54 @@ struct criu_snapshot_process_scope {
 	uint32_t reserved;
 } CRIU_SNAPSHOT_PACKED;
 
+struct criu_snapshot_task_ids_record {
+	uint32_t version;
+	uint32_t pid;
+	uint32_t vm_id;
+	uint32_t files_id;
+	uint32_t fs_id;
+	uint32_t sighand_id;
+	uint32_t flags;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_vma_record {
+	uint64_t start, end, pgoff;
+	uint32_t prot;
+	uint32_t class;
+	uint32_t special;
+	uint32_t dump_policy;
+	uint32_t flags;
+	uint64_t dev, ino;
+	uint64_t pages_present, pages_saved, pages_skipped_zero, pages_skipped_file;
+	char path[512];
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_shmem_object_record {
+	uint32_t version;
+	uint32_t shmid;
+	uint64_t size;
+	uint64_t dev;
+	uint64_t ino;
+	uint32_t flags;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_shmem_page_run_record {
+	uint32_t version;
+	uint32_t shmid;
+	uint64_t page_index;
+	uint32_t nr_pages;
+	uint32_t data_len;
+} CRIU_SNAPSHOT_PACKED;
+
+/* A8 extends the process-scoped VMA payload with an image-level shmem id.
+ * The first 604 bytes remain byte-for-byte compatible with A3-A7. */
+struct criu_snapshot_vma_shared_record {
+	struct criu_vma_record base;
+	uint32_t shmid;
+} CRIU_SNAPSHOT_PACKED;
+
 #if defined(__cplusplus)
 static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
@@ -343,8 +401,12 @@ static_assert(sizeof(struct criu_snapshot_itimers_header) == CRIU_SNAPSHOT_ITIME
 static_assert(sizeof(struct criu_snapshot_itimer_entry) == CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE, "snapshot itimer entry ABI size");
 static_assert(sizeof(struct criu_snapshot_posix_timers_header) == CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE, "snapshot posix timer header ABI size");
 static_assert(sizeof(struct criu_snapshot_posix_timer_entry) == CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE, "snapshot posix timer entry ABI size");
+static_assert(sizeof(struct criu_snapshot_shmem_object_record) == CRIU_SNAPSHOT_SHMEM_OBJECT_RECORD_SIZE, "snapshot shmem object ABI size");
+static_assert(sizeof(struct criu_snapshot_shmem_page_run_record) == CRIU_SNAPSHOT_SHMEM_PAGE_RUN_HEADER_SIZE, "snapshot shmem page run ABI size");
+static_assert(sizeof(struct criu_snapshot_vma_shared_record) == CRIU_SNAPSHOT_VMA_SHARED_RECORD_SIZE, "snapshot shared VMA ABI size");
 static_assert(sizeof(struct criu_snapshot_pstree_record) == CRIU_SNAPSHOT_PSTREE_RECORD_SIZE, "snapshot pstree ABI size");
 static_assert(sizeof(struct criu_snapshot_process_scope) == CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE, "snapshot process scope ABI size");
+static_assert(sizeof(struct criu_snapshot_task_ids_record) == CRIU_SNAPSHOT_TASK_IDS_RECORD_SIZE, "snapshot task ids ABI size");
 #else
 _Static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 _Static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
@@ -364,6 +426,7 @@ _Static_assert(sizeof(struct criu_snapshot_posix_timers_header) == CRIU_SNAPSHOT
 _Static_assert(sizeof(struct criu_snapshot_posix_timer_entry) == CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE, "snapshot posix timer entry ABI size");
 _Static_assert(sizeof(struct criu_snapshot_pstree_record) == CRIU_SNAPSHOT_PSTREE_RECORD_SIZE, "snapshot pstree ABI size");
 _Static_assert(sizeof(struct criu_snapshot_process_scope) == CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE, "snapshot process scope ABI size");
+_Static_assert(sizeof(struct criu_snapshot_task_ids_record) == CRIU_SNAPSHOT_TASK_IDS_RECORD_SIZE, "snapshot task ids ABI size");
 #endif
 
 /* Checksum covers header with checksum field zeroed followed by all TLVs; footer is excluded. */

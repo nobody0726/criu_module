@@ -25,6 +25,9 @@ SIGACTION = 15
 SIGNAL_QUEUE = 16
 ITIMERS = 17
 POSIX_TIMERS = 18
+TASK_IDS = 20
+SHMEM_OBJECT = 21
+SHMEM_PAGE_RUN = 22
 END = 0xFFFF
 
 ROOT = 1
@@ -51,6 +54,14 @@ def pstree(pid, ppid, pgid, sid, flags, born_sid=-1, namespace=1):
 
 def task(pid):
     return struct.pack("<3I", pid, pid, 0)
+
+
+def task_ids(pid, vm_id, files_id, fs_id=None, sighand_id=None, flags=0):
+    if fs_id is None:
+        fs_id = pid
+    if sighand_id is None:
+        sighand_id = pid
+    return struct.pack("<8I", 1, pid, vm_id, files_id, fs_id, sighand_id, flags, 0)
 
 
 def fixed_path(path, size=512):
@@ -108,6 +119,67 @@ def full_process_records(pid, ppid):
     ]
 
 
+def shared_files_process_records(pid, ppid, object_id=9001):
+    """A process record set whose fd carries an explicit shared file object."""
+    records = full_process_records(pid, ppid)
+    out = []
+    for kind, payload, flags in records:
+        if kind != FD:
+            out.append((kind, payload, flags))
+            continue
+        # The legacy 560-byte fd record is followed by A5's object metadata.
+        payload += struct.pack("<QII", object_id, 1, 0)
+        out.append((kind, payload, flags))
+    return out
+
+
+def shared_memory_process_records(pid, ppid, address, shmid=77):
+    """A process record set with one anonymous MAP_SHARED VMA."""
+    records = full_process_records(pid, ppid)
+    out = []
+    for kind, payload, flags in records:
+        if kind == VMA:
+            scope = payload[:8]
+            vma = payload[8:8 + 604]
+            fields = list(struct.unpack("<3Q5I6Q512s", vma))
+            fields[0] = address
+            fields[1] = address + 0x2000
+            fields[3] = 3  # read/write
+            fields[4] = 1  # CRIU_VMA_ANON_SHARED
+            fields[8] = 0x1234  # shmem dev identity
+            fields[9] = 0x5678  # shmem inode identity
+            fields[14] = fixed_path("")
+            extended = struct.pack("<3Q5I6Q512sI", *fields, shmid)
+            out.append((kind, scope + extended, flags))
+        elif kind == PAGE:
+            # Shared payload is represented by the closure-wide shmem stream.
+            continue
+        else:
+            out.append((kind, payload, flags))
+    return out
+
+
+def ipc_process_records(pid, ppid, fd_type, object_id, extra):
+    records = full_process_records(pid, ppid)
+    out = []
+    for kind, payload, flags in records:
+        if kind != FD:
+            out.append((kind, payload, flags))
+            continue
+        scope = payload[:8]
+        fd = bytearray(payload[8:8 + 560])
+        struct.pack_into("<I", fd, 4, 0o10000 | (0o10666 if fd_type == 2 else 0))
+        struct.pack_into("<Q", fd, 8, 0)
+        struct.pack_into("<Q", fd, 16, 0)
+        struct.pack_into("<Q", fd, 24, 0)
+        struct.pack_into("<Q", fd, 32, object_id)
+        fd[48:560] = fixed_path("")
+        fd += struct.pack("<QII", object_id, fd_type, 0)
+        out.append((kind, scope + bytes(fd), flags))
+    out.extend(extra)
+    return out
+
+
 def build(records, flags=PSTREE_FLAG):
     body = b"".join(tlv(*record) for record in records) + tlv(END, b"")
     total = HEADER + len(body) + FOOTER
@@ -133,6 +205,13 @@ def tree_session():
     return [
         (PSTREE, pstree(200, 0, 200, 200, ROOT | SESSION_LEADER | PGRP_LEADER)),
         (PSTREE, pstree(201, 200, 201, 201, SESSION_LEADER | PGRP_LEADER)),
+    ]
+
+
+def a8_tree():
+    return [
+        (PSTREE, pstree(400, 0, 400, 400, ROOT | SESSION_LEADER | PGRP_LEADER)),
+        (PSTREE, pstree(401, 400, 400, 400, 0)),
     ]
 
 
@@ -167,14 +246,103 @@ def main(out_dir):
         (PSTREE, pstree(141, 140, 141, 141, SESSION_LEADER | PGRP_LEADER,
                          born_sid=999)),
     ]))
-    scoped = struct.pack("<II", 999, 0) + task(100)
+    scoped_payload = struct.pack("<II", 999, 0) + task(100)
     (out / "a7-owner-mismatch.bin").write_bytes(build([
         (PSTREE, pstree(150, 0, 150, 150, ROOT | SESSION_LEADER | PGRP_LEADER)),
-        (TASK, scoped, SCOPE_FLAG),
+        (TASK, scoped_payload, SCOPE_FLAG),
     ]))
     full = tree_simple() + full_process_records(100, 0) + full_process_records(101, 100)
     (out / "a7-full-multi.bin").write_bytes(
         build(full, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    a8_full = tree_simple() + [
+        scoped(100, TASK_IDS, task_ids(100, 501, 77)),
+        scoped(101, TASK_IDS, task_ids(101, 502, 77)),
+    ] + full_process_records(100, 0) + full_process_records(101, 100)
+    (out / "a8-full-task-ids.bin").write_bytes(
+        build(a8_full, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    a8_valid = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 77)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 77)),
+    ]
+    (out / "a8-valid-shared-files.bin").write_bytes(build(a8_valid))
+    (out / "a8-duplicate-task-ids.bin").write_bytes(build(
+        a8_valid + [scoped(400, TASK_IDS, task_ids(400, 402, 78))]
+    ))
+    (out / "a8-missing-task-ids.bin").write_bytes(build(
+        a8_tree() + [scoped(400, TASK_IDS, task_ids(400, 400, 77))]
+    ))
+    (out / "a8-nonthread-shared-vm.bin").write_bytes(build(
+        a8_tree() + [
+            scoped(400, TASK_IDS, task_ids(400, 99, 400)),
+            scoped(401, TASK_IDS, task_ids(401, 99, 401)),
+        ]
+    ))
+    shared = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 77)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 77)),
+    ]
+    shared += shared_files_process_records(400, 0)
+    shared += shared_files_process_records(401, 400)
+    (out / "a8-shared-files.bin").write_bytes(
+        build(shared, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    distinct = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 77)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 78)),
+    ]
+    distinct += shared_files_process_records(400, 0, object_id=9100)
+    distinct += shared_files_process_records(401, 400, object_id=9100)
+    (out / "a8-shared-file-object.bin").write_bytes(
+        build(distinct, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    pipe = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 87)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 88)),
+    ]
+    pipe += ipc_process_records(400, 0, 2, 5001, [
+        scoped(400, 11, struct.pack("<IIQQII", 1, 0, 5001, 700, 1, 0)),
+        scoped(400, 12, struct.pack("<IIQQII", 1, 0, 700, 4096, 5, 0) + b"hello"),
+    ])
+    pipe += ipc_process_records(401, 400, 2, 5002, [
+        scoped(401, 11, struct.pack("<IIQQII", 1, 0, 5002, 700, 2, 0)),
+    ])
+    (out / "a8-cross-pipe.bin").write_bytes(
+        build(pipe, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    unix = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 97)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 98)),
+    ]
+    unix += ipc_process_records(400, 0, 3, 6001, [
+        scoped(400, 13, struct.pack("<IIQQIIIIQ", 1, 0, 6001, 6002,
+                                    1, 1, 1, 0, (212992 << 32) | 212992)),
+        scoped(400, 14, struct.pack("<IIQIIQ", 1, 0, 6001, 5, 0, 0) + b"hello"),
+    ])
+    unix += ipc_process_records(401, 400, 3, 6002, [
+        scoped(401, 13, struct.pack("<IIQQIIIIQ", 1, 0, 6002, 6001,
+                                    1, 1, 1, 0, (212992 << 32) | 212992)),
+        scoped(401, 14, struct.pack("<IIQIIQ", 1, 0, 6002, 5, 0, 0) + b"world"),
+    ])
+    (out / "a8-cross-unix.bin").write_bytes(
+        build(unix, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    shmem = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 107)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 108)),
+    ]
+    shmem += shared_memory_process_records(400, 0, 0x500000)
+    shmem += shared_memory_process_records(401, 400, 0x700000)
+    shmem += [
+        (SHMEM_OBJECT,
+         struct.pack("<IIQQQII", 1, 77, 0x2000, 0x1234, 0x5678, 0, 0)),
+        (SHMEM_PAGE_RUN,
+         struct.pack("<IIQII", 1, 77, 0, 2, 8192) +
+         bytes([0xA8]) * 8192),
+    ]
+    (out / "a8-shmem-shared.bin").write_bytes(
+        build(shmem, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
     )
 
 

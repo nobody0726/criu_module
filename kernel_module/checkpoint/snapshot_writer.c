@@ -205,6 +205,13 @@ int criu_snapshot_writer_record(struct criu_snapshot_writer *w, u16 type,
 	return criu_snapshot_writer_record_flags(w, type, flags, payload, length);
 }
 
+int criu_snapshot_writer_global_record(struct criu_snapshot_writer *w,
+				       u16 type, const void *payload,
+				       u64 length)
+{
+	return criu_snapshot_writer_record_flags(w, type, 0, payload, length);
+}
+
 int criu_snapshot_writer_process_record(struct criu_snapshot_writer *w,
 					u32 owner_pid, u16 type, u16 flags,
 					const void *payload, u64 length)

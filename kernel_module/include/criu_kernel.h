@@ -49,6 +49,7 @@ struct criu_vma_info {
 	bool shared, growsdown, dontdump, locked;
 	dev_t dev;
 	unsigned long ino;
+	struct inode *inode;
 	enum criu_path_status path_status;
 	enum criu_sample_status sample_status;
 	u8 sample;
