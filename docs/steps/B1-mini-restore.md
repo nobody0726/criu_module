@@ -541,3 +541,15 @@ B1_KERNEL_ASSISTED_RESTORE: PASS
 
 Do not emit that marker until exact PID liveness, tick growth, markers/TLS/maps, and clean dmesg
 are all verified in the guest.
+
+## Task 11 negative/build coverage status
+
+`tests/b1-negative.sh` covers the current userspace support matrix: dirty file-private VMA,
+vDSO relocation, shared mapping, multi-thread image, child/process-tree image, namespace
+metadata, invalid backing-file identity, overlapping VMAs, and malformed fields. Target PID
+occupied and duplicate COMMIT remain live-kernel-only negative cases and are explicitly deferred
+until the Task 10 guest gate is unblocked.
+
+`tests/b1-patch-build.sh` runs the B1 patch contracts and a dry-run application of patch 0004
+against the pinned Linux 5.10.29 source tree when it is available. Full kernel build and real
+guest restore remain required before B1 can be marked complete.
