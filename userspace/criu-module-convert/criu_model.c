@@ -2837,7 +2837,8 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 		    append_ipc_list(&ipc_model.unix_sockets,
 				    &view.unix_sockets) ||
 		    append_ipc_list(&ipc_model.socket_queues,
-				    &view.socket_queues))
+				    &view.socket_queues) ||
+		    append_ipc_list(&ipc_model.fds, &view.fds))
 			goto out_message;
 		if (validate_model(&view) ||
 		    model_task_ids(&view, process->pid, &all_task_ids[i]))
