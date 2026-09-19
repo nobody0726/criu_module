@@ -173,12 +173,14 @@ int criu_snapshot_writer_open(struct criu_snapshot_writer *w,
 	return 0;
 }
 
-int criu_snapshot_writer_record(struct criu_snapshot_writer *w, u16 type,
-				u16 flags, const void *payload, u64 length)
+static int criu_snapshot_writer_record_flags(struct criu_snapshot_writer *w,
+					     u16 type, u16 flags,
+					     const void *payload, u64 length)
 {
 	struct criu_snapshot_tlv tlv;
 	if (!w || !w->file || w->ended || (!payload && length) ||
-	    flags || length > CRIU_SNAPSHOT_MAX_RECORD_SIZE ||
+	    (flags & ~CRIU_SNAPSHOT_TLV_F_PROCESS_SCOPE) ||
+	    length > CRIU_SNAPSHOT_MAX_RECORD_SIZE ||
 	    w->record_count >= CRIU_SNAPSHOT_MAX_RECORDS ||
 	    w->total_size > CRIU_SNAPSHOT_MAX_TOTAL_SIZE - sizeof(tlv) - length)
 		return -EINVAL;
@@ -190,6 +192,42 @@ int criu_snapshot_writer_record(struct criu_snapshot_writer *w, u16 type,
 	w->record_count++;
 	if (type == CRIU_SNAPSHOT_REC_END) w->ended = true;
 	return 0;
+}
+
+int criu_snapshot_writer_record(struct criu_snapshot_writer *w, u16 type,
+				u16 flags, const void *payload, u64 length)
+{
+	if (flags)
+		return -EINVAL;
+	return criu_snapshot_writer_record_flags(w, type, flags, payload, length);
+}
+
+int criu_snapshot_writer_process_record(struct criu_snapshot_writer *w,
+					u32 owner_pid, u16 type, u16 flags,
+					const void *payload, u64 length)
+{
+	struct criu_snapshot_process_scope *scope_payload;
+	u64 total;
+	int ret;
+
+	if (!w || !owner_pid || flags || (!payload && length) ||
+	    length > CRIU_SNAPSHOT_MAX_RECORD_SIZE -
+		     CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE)
+		return -EINVAL;
+	total = CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE + length;
+	scope_payload = kmalloc(total, GFP_KERNEL);
+	if (!scope_payload)
+		return -ENOMEM;
+	scope_payload->owner_pid = cpu_to_le32(owner_pid);
+	scope_payload->reserved = 0;
+	if (length)
+		memcpy((u8 *)scope_payload + CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE,
+		       payload, length);
+	ret = criu_snapshot_writer_record_flags(
+		w, type, CRIU_SNAPSHOT_TLV_F_PROCESS_SCOPE,
+		scope_payload, total);
+	kfree(scope_payload);
+	return ret;
 }
 
 int criu_snapshot_writer_finish(struct criu_snapshot_writer *w)

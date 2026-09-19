@@ -12,6 +12,7 @@
 #include "dump.h"
 #include "dump_files.h"
 #include "dump_mm.h"
+#include "dump_pstree.h"
 #include "dump_signals.h"
 #include "dump_task.h"
 #include "dump_threads.h"
@@ -178,6 +179,76 @@ int criu_dump_process(pid_t vpid, const char *path)
 out:
 	if (mm)
 		mmput(mm);
+	if (task)
+		put_task_struct(task);
+	return ret;
+}
+
+int criu_dump_process_tree(pid_t vpid, const char *path)
+{
+	struct task_struct *task = NULL;
+	struct criu_freeze_ctx *freeze_ctx = NULL;
+	struct criu_snapshot_header header;
+	struct criu_snapshot_writer writer;
+	struct criu_freeze_process_view root_view;
+	u64 generation, frozen_generation;
+	unsigned int process_count;
+	int ret, thaw_ret;
+	bool opened = false;
+
+	if (vpid <= 0 || !path || !*path)
+		return -EINVAL;
+	task = criu_target_get(&generation);
+	if (!task || task_pid_vnr(task) != vpid) {
+		if (task)
+			put_task_struct(task);
+		return -ESRCH;
+	}
+	ret = criu_freeze(vpid, true, &freeze_ctx);
+	if (ret)
+		goto out;
+	ret = criu_freeze_generation(freeze_ctx, &frozen_generation);
+	if (!ret && frozen_generation != generation)
+		ret = -EAGAIN;
+	if (!ret)
+		ret = criu_freeze_process_count(freeze_ctx, &process_count);
+	if (!ret && (!process_count ||
+		     criu_freeze_process_get(freeze_ctx, 0, &root_view)))
+		ret = -EAGAIN;
+	if (ret)
+		goto thaw;
+	memset(&header, 0, sizeof(header));
+	header.magic = CRIU_SNAPSHOT_MAGIC;
+	header.version = CRIU_SNAPSHOT_VERSION;
+	header.header_size = CRIU_SNAPSHOT_HEADER_SIZE;
+	header.flags = CRIU_SNAPSHOT_F_PSTREE;
+#ifdef CONFIG_ARM64
+	header.arch = 183;
+#elif defined(CONFIG_X86_64)
+	header.arch = 62;
+#endif
+	header.page_size = PAGE_SIZE;
+	header.pid = root_view.pid;
+	header.tgid = root_view.tgid;
+	header.freeze_generation = generation;
+	ret = criu_snapshot_writer_open(&writer, path, &header);
+	if (ret)
+		goto thaw;
+	opened = true;
+	ret = criu_dump_pstree(freeze_ctx, &writer);
+	if (!ret)
+		ret = criu_snapshot_writer_record(&writer,
+						  CRIU_SNAPSHOT_REC_END,
+						  0, NULL, 0);
+	if (!ret)
+		ret = criu_snapshot_writer_finish(&writer);
+	if (ret && opened)
+		criu_snapshot_writer_abort(&writer);
+thaw:
+	thaw_ret = criu_thaw(freeze_ctx);
+	if (!ret && thaw_ret)
+		ret = thaw_ret;
+out:
 	if (task)
 		put_task_struct(task);
 	return ret;

@@ -24,6 +24,9 @@ int criu_snapshot_writer_open(struct criu_snapshot_writer *writer,
 int criu_snapshot_writer_record(struct criu_snapshot_writer *writer,
 				 u16 type, u16 flags,
 				 const void *payload, u64 length);
+int criu_snapshot_writer_process_record(struct criu_snapshot_writer *writer,
+					u32 owner_pid, u16 type, u16 flags,
+					const void *payload, u64 length);
 int criu_snapshot_writer_finish(struct criu_snapshot_writer *writer);
 void criu_snapshot_writer_abort(struct criu_snapshot_writer *writer);
 
