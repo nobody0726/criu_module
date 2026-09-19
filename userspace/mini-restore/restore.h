@@ -29,6 +29,7 @@ struct b1_vma_record {
 	int shared;
 	int dirty_file_private;
 	int file_stable;
+	int backing_fd;
 	uint64_t file_size;
 };
 

@@ -268,6 +268,8 @@ static enum b1_restore_status read_mm(const char *dir,
 		return B1_RESTORE_IO;
 	}
 	image->vma_count = (size_t)count;
+	for (i = 0; i < image->vma_count; i++)
+		image->vmas[i].backing_fd = -1;
 	for (i = 0; i < image->vma_count; i++) {
 		char key[64];
 		enum b1_restore_status kind_st;

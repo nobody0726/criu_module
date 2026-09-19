@@ -2,7 +2,7 @@ CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c11
 CPPFLAGS += -I../../include
 
-OBJS := image_reader.o validator.o carrier.o files.o
+OBJS := image_reader.o validator.o carrier.o files.o staging.o
 
 all: libmini_restore.a
 
