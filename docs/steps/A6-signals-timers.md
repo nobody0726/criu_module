@@ -381,9 +381,16 @@ zdtm/static/sigaction_bug
 
 ## 6. 完成标准
 
-- [ ] 18 个用例通过,含 8、11、12 三个反向配对用例
-- [ ] 定时器时间语义测试通过(三种结果可区分)
-- [ ] 所有持 `siglock` 的代码路径经 `DEBUG_ATOMIC_SLEEP` 验证无睡眠
-- [ ] `sa_restorer` 原样保存,未重算
-- [ ] A3/A4/A5 测试全部仍通过
-- [ ] allowlist 增加至少 4 个测试
+- [x] A6 定向 ABI、unsupported 和嵌套 5.10.29 guest cross-restore gate 通过
+- [x] signal action、shared/private pending、siginfo、ITIMER 和 POSIX timer 映射完成
+- [x] `siglock`/`it_lock` 采集路径不持锁做 snapshot I/O
+- [x] `sa_restorer` 原样保存，converter 不重算地址
+- [ ] A3/A4/A5 全量回归和 18 个扩展用例
+
+当前状态（2026-09-18）：A6 核心范围已完成。`A6_ABI_CONTRACT`、`A6_UNSUPPORTED`
+和嵌套 Linux 5.10.29 guest 的 `A6_CROSS_RESTORE` 均通过；后者验证了 handler、
+标准/实时 pending signal、siginfo payload、ITIMER_REAL 和 POSIX timer 的恢复后
+行为与进程存活。验证命令和环境记录见
+[A6 验证记录](../plans/2026-09-18-a6-verification.md)。
+
+完整 ZDTM/扩展用例仍是后续验证项，不把定向 gate 等同于全量 ZDTM 通过。

@@ -39,8 +39,34 @@ typedef __u64 uint64_t;
 #define CRIU_SNAPSHOT_UNIX_SOCKET_VERSION 1U
 #define CRIU_SNAPSHOT_SOCKET_QUEUE_VERSION 1U
 #define CRIU_SNAPSHOT_HEADER_FLAGS 0U
+#define CRIU_SNAPSHOT_F_SIGNAL_TIMERS (1U << 0)
+#define CRIU_SNAPSHOT_HEADER_KNOWN_FLAGS CRIU_SNAPSHOT_F_SIGNAL_TIMERS
 #define CRIU_SNAPSHOT_TLV_FLAGS 0U
 #define CRIU_SNAPSHOT_FOOTER_FLAGS 0U
+
+#define CRIU_SNAPSHOT_SIGACTION_VERSION 1U
+#define CRIU_SNAPSHOT_SIGNAL_QUEUE_VERSION 1U
+#define CRIU_SNAPSHOT_ITIMERS_VERSION 1U
+#define CRIU_SNAPSHOT_POSIX_TIMERS_VERSION 1U
+#define CRIU_SNAPSHOT_SIGINFO_SIZE 128U
+#define CRIU_SNAPSHOT_SIGACTION_ENTRY_SIZE 48U
+#define CRIU_SNAPSHOT_SIGACTION_COUNT 64U
+#define CRIU_SNAPSHOT_SIGACTION_HEADER_SIZE 16U
+#define CRIU_SNAPSHOT_SIGNAL_QUEUE_ENTRY_SIZE 136U
+#define CRIU_SNAPSHOT_SIGNAL_QUEUE_HEADER_SIZE 48U
+#define CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE 24U
+#define CRIU_SNAPSHOT_ITIMER_COUNT 3U
+#define CRIU_SNAPSHOT_ITIMER_HEADER_SIZE 16U
+#define CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE 56U
+#define CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE 16U
+
+#define CRIU_SNAPSHOT_SIGNAL_SCOPE_SHARED 1U
+#define CRIU_SNAPSHOT_SIGNAL_SCOPE_PRIVATE 2U
+#define CRIU_SNAPSHOT_ITIMER_REAL 1U
+#define CRIU_SNAPSHOT_ITIMER_VIRTUAL 2U
+#define CRIU_SNAPSHOT_ITIMER_PROF 3U
+#define CRIU_SNAPSHOT_POSIX_TIMER_F_ARMED (1U << 0)
+#define CRIU_SNAPSHOT_POSIX_TIMER_F_HAS_NOTIFY_TID (1U << 1)
 
 /* The serialized ABI is little-endian; big-endian producers are unsupported. */
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
@@ -62,6 +88,10 @@ enum criu_snapshot_record_type {
 	CRIU_SNAPSHOT_REC_PIPE_DATA = 12,
 	CRIU_SNAPSHOT_REC_UNIX_SOCKET = 13,
 	CRIU_SNAPSHOT_REC_SOCKET_QUEUE = 14,
+	CRIU_SNAPSHOT_REC_SIGACTION = 15,
+	CRIU_SNAPSHOT_REC_SIGNAL_QUEUE = 16,
+	CRIU_SNAPSHOT_REC_ITIMERS = 17,
+	CRIU_SNAPSHOT_REC_POSIX_TIMERS = 18,
 	CRIU_SNAPSHOT_REC_END = 0xffff,
 };
 
@@ -192,6 +222,77 @@ struct criu_snapshot_socket_queue_record {
 	uint64_t reserved;
 } CRIU_SNAPSHOT_PACKED;
 
+struct criu_snapshot_sigaction_header {
+	uint32_t version;
+	uint32_t entry_count;
+	uint32_t entry_size;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_sigaction_entry {
+	uint32_t signo;
+	uint32_t reserved;
+	uint64_t handler;
+	uint64_t flags;
+	uint64_t restorer;
+	uint64_t mask;
+	uint64_t mask_extended;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_signal_queue_header {
+	uint32_t version;
+	uint32_t scope;
+	uint32_t owner_tid;
+	uint32_t total_count;
+	uint32_t first_index;
+	uint32_t entry_count;
+	uint32_t entry_size;
+	uint32_t siginfo_size;
+	uint64_t pending_mask;
+	uint64_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_signal_queue_entry {
+	uint32_t signo;
+	uint32_t reserved;
+	uint8_t siginfo[CRIU_SNAPSHOT_SIGINFO_SIZE];
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_itimers_header {
+	uint32_t version;
+	uint32_t entry_count;
+	uint32_t entry_size;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_itimer_entry {
+	uint32_t kind;
+	uint32_t flags;
+	uint64_t interval_ns;
+	uint64_t remaining_ns;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_posix_timers_header {
+	uint32_t version;
+	uint32_t entry_count;
+	uint32_t entry_size;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_posix_timer_entry {
+	uint32_t timer_id;
+	uint32_t clock_id;
+	uint32_t signo;
+	uint32_t sigev_notify;
+	uint32_t flags;
+	uint32_t overrun;
+	uint32_t notify_tid;
+	uint32_t reserved;
+	uint64_t sival_ptr;
+	uint64_t interval_ns;
+	uint64_t remaining_ns;
+} CRIU_SNAPSHOT_PACKED;
+
 #if defined(__cplusplus)
 static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
@@ -201,6 +302,14 @@ static_assert(sizeof(struct criu_snapshot_pipe_endpoint_record) == CRIU_SNAPSHOT
 static_assert(sizeof(struct criu_snapshot_pipe_data_record) == CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE, "snapshot pipe data ABI size");
 static_assert(sizeof(struct criu_snapshot_unix_socket_record) == CRIU_SNAPSHOT_UNIX_SOCKET_RECORD_SIZE, "snapshot unix socket ABI size");
 static_assert(sizeof(struct criu_snapshot_socket_queue_record) == CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE, "snapshot socket queue ABI size");
+static_assert(sizeof(struct criu_snapshot_sigaction_header) == CRIU_SNAPSHOT_SIGACTION_HEADER_SIZE, "snapshot sigaction header ABI size");
+static_assert(sizeof(struct criu_snapshot_sigaction_entry) == CRIU_SNAPSHOT_SIGACTION_ENTRY_SIZE, "snapshot sigaction entry ABI size");
+static_assert(sizeof(struct criu_snapshot_signal_queue_header) == CRIU_SNAPSHOT_SIGNAL_QUEUE_HEADER_SIZE, "snapshot signal queue header ABI size");
+static_assert(sizeof(struct criu_snapshot_signal_queue_entry) == CRIU_SNAPSHOT_SIGNAL_QUEUE_ENTRY_SIZE, "snapshot signal queue entry ABI size");
+static_assert(sizeof(struct criu_snapshot_itimers_header) == CRIU_SNAPSHOT_ITIMER_HEADER_SIZE, "snapshot itimer header ABI size");
+static_assert(sizeof(struct criu_snapshot_itimer_entry) == CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE, "snapshot itimer entry ABI size");
+static_assert(sizeof(struct criu_snapshot_posix_timers_header) == CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE, "snapshot posix timer header ABI size");
+static_assert(sizeof(struct criu_snapshot_posix_timer_entry) == CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE, "snapshot posix timer entry ABI size");
 #else
 _Static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 _Static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
@@ -210,6 +319,14 @@ _Static_assert(sizeof(struct criu_snapshot_pipe_endpoint_record) == CRIU_SNAPSHO
 _Static_assert(sizeof(struct criu_snapshot_pipe_data_record) == CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE, "snapshot pipe data ABI size");
 _Static_assert(sizeof(struct criu_snapshot_unix_socket_record) == CRIU_SNAPSHOT_UNIX_SOCKET_RECORD_SIZE, "snapshot unix socket ABI size");
 _Static_assert(sizeof(struct criu_snapshot_socket_queue_record) == CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE, "snapshot socket queue ABI size");
+_Static_assert(sizeof(struct criu_snapshot_sigaction_header) == CRIU_SNAPSHOT_SIGACTION_HEADER_SIZE, "snapshot sigaction header ABI size");
+_Static_assert(sizeof(struct criu_snapshot_sigaction_entry) == CRIU_SNAPSHOT_SIGACTION_ENTRY_SIZE, "snapshot sigaction entry ABI size");
+_Static_assert(sizeof(struct criu_snapshot_signal_queue_header) == CRIU_SNAPSHOT_SIGNAL_QUEUE_HEADER_SIZE, "snapshot signal queue header ABI size");
+_Static_assert(sizeof(struct criu_snapshot_signal_queue_entry) == CRIU_SNAPSHOT_SIGNAL_QUEUE_ENTRY_SIZE, "snapshot signal queue entry ABI size");
+_Static_assert(sizeof(struct criu_snapshot_itimers_header) == CRIU_SNAPSHOT_ITIMER_HEADER_SIZE, "snapshot itimer header ABI size");
+_Static_assert(sizeof(struct criu_snapshot_itimer_entry) == CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE, "snapshot itimer entry ABI size");
+_Static_assert(sizeof(struct criu_snapshot_posix_timers_header) == CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE, "snapshot posix timer header ABI size");
+_Static_assert(sizeof(struct criu_snapshot_posix_timer_entry) == CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE, "snapshot posix timer entry ABI size");
 #endif
 
 /* Checksum covers header with checksum field zeroed followed by all TLVs; footer is excluded. */

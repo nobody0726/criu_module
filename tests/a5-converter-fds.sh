@@ -238,5 +238,5 @@ if "$ROOT/userspace/criu-module-convert/criu-module-convert" "$TMP/valid.bin" -D
 fi
 test "$(cat "$TMP/existing/sentinel")" = keep
 test "$(find "$TMP/existing" -type f | wc -l)" -eq 1
-test -z "$(find "$TMP" -name '*.a5-tmp.*' -print)"
+test -z "$(find "$TMP" -name '*.criu-module-tmp.*' -print)"
 echo 'A5_CONVERTER_FDS: PASS'

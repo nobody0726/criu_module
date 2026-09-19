@@ -2,6 +2,9 @@
 set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
+freeze="$root_dir/kernel_module/checkpoint/freeze.c"
+dump="$root_dir/kernel_module/checkpoint/dump.c"
+api="$root_dir/kernel_module/include/criu_kernel.h"
 task_c="$root_dir/kernel_module/checkpoint/dump_task.c"
 task_h="$root_dir/kernel_module/checkpoint/dump_task.h"
 files_c="$root_dir/kernel_module/checkpoint/dump_files.c"
@@ -13,7 +16,6 @@ grep -q 'CRIU_SNAPSHOT_REC_TASK' "$task_h"
 grep -q 'CRIU_SNAPSHOT_REC_REGS' "$task_h"
 grep -q 'CRIU_SNAPSHOT_REC_CREDS' "$task_h"
 grep -q 'CRIU_SNAPSHOT_UNSUPPORTED' "$task_c"
-grep -q 'signal_pending' "$task_c"
 grep -q 'rlim' "$task_c"
 grep -q 'thread.uw.tp_value' "$task_c"
 grep -q 'task_pt_regs' "$task_c"
@@ -29,11 +31,19 @@ grep -q 'checkpoint/dump_files.o' "$makefile"
 # Linux 5.10.29 does not export the files_struct reference helpers to modules.
 ! grep -qE '\b(get_files_struct|put_files_struct)\s*\(' "$files_c"
 grep -q 'task->files' "$files_c"
-
-# Signal/timer handling remains A6; A5 expands the FD table beyond 0/1/2.
-grep -q 'sighand' "$task_c"
-grep -q 'timers' "$task_c"
+grep -q 'criu_collect_signals' "$dump"
+grep -q 'criu_collect_timers' "$dump"
 grep -q 'atomic_inc(&files->count)' "$files_c"
 grep -q 'files_fdtable' "$files_c"
 grep -q 'get_file' "$files_c"
-printf 'DUMP_TASK: PASS\n'
+grep -Eq "struct criu_freeze_task_view" "$api"
+grep -Eq "criu_freeze_task_count" "$api"
+grep -Eq "criu_freeze_task_get" "$api"
+grep -Eq "criu_freeze_task_count\\(freeze_ctx" "$dump"
+grep -Eq "criu_freeze_task_get\\(freeze_ctx" "$dump"
+grep -Eq "get_task_struct\\(ctx->target\\)" "$freeze"
+grep -Eq "put_task_struct\\(tasks\\[--i\\]\\.task\\)" "$freeze"
+test -f "$root_dir/kernel_module/checkpoint/dump_signals.h"
+test -f "$root_dir/kernel_module/checkpoint/dump_timers.h"
+
+echo 'DUMP_TASK_CONTRACT: PASS'
