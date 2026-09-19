@@ -63,6 +63,9 @@
 #define VMA_DEV_OFFSET 44U
 #define VMA_INO_OFFSET 52U
 #define VMA_PATH_OFFSET 92U
+#define VMA_SHMID_OFFSET 604U
+#define SHMEM_OBJECT_RECORD_SIZE 40U
+#define SHMEM_PAGE_RUN_HEADER_SIZE 24U
 
 #define VMA_CLASS_ANON_PRIVATE 0U
 #define VMA_CLASS_ANON_SHARED 1U
@@ -84,6 +87,7 @@
 #define VMA_AREA_NOT_ACCOUNTABLE (1U << 18)
 
 #define MAP_PRIVATE 0x02U
+#define MAP_SHARED 0x01U
 #define MAP_ANONYMOUS 0x20U
 #define MAP_GROWSDOWN 0x100U
 #define AF_UNIX_VALUE 1U
@@ -117,6 +121,8 @@ struct process_model {
 	struct blob_list vmas;
 	struct blob_list fds;
 	struct blob_list pages;
+	struct blob_list shmem_objects;
+	struct blob_list shmem_page_runs;
 	struct blob_list threads;
 	struct blob_list pipe_endpoints;
 	struct blob_list pipe_data;
@@ -138,6 +144,8 @@ struct snapshot_model {
 	struct blob_list vmas;
 	struct blob_list fds;
 	struct blob_list pages;
+	struct blob_list shmem_objects;
+	struct blob_list shmem_page_runs;
 	struct blob_list threads;
 	struct blob_list pipe_endpoints;
 	struct blob_list pipe_data;
@@ -257,6 +265,8 @@ static void model_free(struct snapshot_model *model)
 	free(model->vmas.items);
 	free(model->fds.items);
 	free(model->pages.items);
+	free(model->shmem_objects.items);
+	free(model->shmem_page_runs.items);
 	free(model->threads.items);
 	free(model->pipe_endpoints.items);
 	free(model->pipe_data.items);
@@ -268,6 +278,8 @@ static void model_free(struct snapshot_model *model)
 		free(model->processes[i].vmas.items);
 		free(model->processes[i].fds.items);
 		free(model->processes[i].pages.items);
+		free(model->processes[i].shmem_objects.items);
+		free(model->processes[i].shmem_page_runs.items);
 		free(model->processes[i].threads.items);
 		free(model->processes[i].pipe_endpoints.items);
 		free(model->processes[i].pipe_data.items);
@@ -477,6 +489,14 @@ static int collect_records(const struct snapshot_document *doc,
 			if (list_add(process ? &process->pages : &model->pages,
 				     payload, len))
 				goto io_error;
+			break;
+		case CRIU_SNAPSHOT_REC_SHMEM_OBJECT:
+			if (process || list_add(&model->shmem_objects, payload, len))
+				goto format_error;
+			break;
+		case CRIU_SNAPSHOT_REC_SHMEM_PAGE_RUN:
+			if (process || list_add(&model->shmem_page_runs, payload, len))
+				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_THREAD:
 			if (list_add(process ? &process->threads : &model->threads,
@@ -1053,7 +1073,21 @@ static int validate_model(const struct snapshot_model *model)
 		/* vDSO/vvar are represented by the kernel classifier as class=4
 		 * (unsupported ordinary mapping) but are explicitly supported special
 		 * mappings with their own CRIU status bits. */
-		if (class == VMA_CLASS_ANON_SHARED || class == VMA_CLASS_FILE_SHARED ||
+		if (class == VMA_CLASS_ANON_SHARED &&
+		    (model->vmas.items[i].len < CRIU_SNAPSHOT_VMA_SHARED_RECORD_SIZE ||
+		     !u32(vma + VMA_SHMID_OFFSET)))
+			return SNAPSHOT_READER_FORMAT_ERROR;
+		if (class == VMA_CLASS_ANON_SHARED &&
+		    model->vmas.items[i].len >= CRIU_SNAPSHOT_VMA_SHARED_RECORD_SIZE) {
+			uint32_t shmid = u32(vma + VMA_SHMID_OFFSET);
+			bool found = false;
+			for (j = 0; j < model->shmem_objects.count; j++)
+				if (u32(model->shmem_objects.items[j].data + 4) == shmid)
+					found = true;
+			if (!found)
+				return SNAPSHOT_READER_FORMAT_ERROR;
+		}
+		if (class == VMA_CLASS_FILE_SHARED ||
 			(class > VMA_CLASS_FILE_PRIVATE &&
 			 (special != VMA_SPECIAL_VDSO && special != VMA_SPECIAL_VVAR)) ||
 			special > VMA_SPECIAL_VVAR) {
@@ -1062,6 +1096,41 @@ static int validate_model(const struct snapshot_model *model)
 		}
 		if (u64(vma) >= u64(vma + 8) ||
 			copy_fixed_string(path, sizeof(path), vma + VMA_PATH_OFFSET, 512))
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	}
+	for (i = 0; i < model->shmem_objects.count; i++) {
+		const uint8_t *object = model->shmem_objects.items[i].data;
+		uint32_t shmid;
+		uint64_t size;
+
+		if (model->shmem_objects.items[i].len != SHMEM_OBJECT_RECORD_SIZE ||
+		    u32(object) != CRIU_SNAPSHOT_SHMEM_OBJECT_VERSION ||
+		    !(shmid = u32(object + 4)) ||
+		    !(size = u64(object + 8)) ||
+		    size % model->page_size)
+			return SNAPSHOT_READER_FORMAT_ERROR;
+		for (j = 0; j < i; j++)
+			if (u32(model->shmem_objects.items[j].data + 4) == shmid)
+				return SNAPSHOT_READER_FORMAT_ERROR;
+	}
+	for (i = 0; i < model->shmem_page_runs.count; i++) {
+		const uint8_t *run = model->shmem_page_runs.items[i].data;
+		uint32_t shmid = u32(run + 4);
+		uint32_t nr_pages = u32(run + 16);
+		uint32_t data_len = u32(run + 20);
+		bool found = false;
+
+		if (model->shmem_page_runs.items[i].len < SHMEM_PAGE_RUN_HEADER_SIZE ||
+		    u32(run) != CRIU_SNAPSHOT_SHMEM_PAGE_RUN_VERSION ||
+		    !shmid || !nr_pages ||
+		    data_len != nr_pages * model->page_size ||
+		    data_len != model->shmem_page_runs.items[i].len -
+		    SHMEM_PAGE_RUN_HEADER_SIZE)
+			return SNAPSHOT_READER_FORMAT_ERROR;
+		for (j = 0; j < model->shmem_objects.count; j++)
+			if (u32(model->shmem_objects.items[j].data + 4) == shmid)
+				found = true;
+		if (!found)
 			return SNAPSHOT_READER_FORMAT_ERROR;
 	}
 	for (i = 0; i < model->fds.count; i++) {
@@ -1788,9 +1857,12 @@ static uint32_t vma_flags(const uint8_t *vma)
 	uint32_t special = u32(vma + 32);
 	uint32_t flags = MAP_PRIVATE;
 
-	if (class == VMA_CLASS_ANON_PRIVATE || special == VMA_SPECIAL_VDSO ||
+	if (class == VMA_CLASS_ANON_PRIVATE || class == VMA_CLASS_ANON_SHARED ||
+	    special == VMA_SPECIAL_VDSO ||
 		special == VMA_SPECIAL_VVAR)
 		flags |= MAP_ANONYMOUS;
+	if (class == VMA_CLASS_ANON_SHARED)
+		flags = (flags & ~MAP_PRIVATE) | MAP_SHARED;
 	if (u32(vma + VMA_FLAGS_OFFSET) & 2U)
 		flags |= MAP_GROWSDOWN;
 	return flags;
@@ -1827,7 +1899,11 @@ static int build_vma(const struct snapshot_model *model, size_t index,
 	uint64_t pgoff = u64(vma + 16);
 	uint64_t pgoff_bytes = 0;
 
-	if (class == VMA_CLASS_FILE_PRIVATE) {
+	if (class == VMA_CLASS_ANON_SHARED) {
+		if (model->vmas.items[index].len < CRIU_SNAPSHOT_VMA_SHARED_RECORD_SIZE)
+			return -1;
+		shmid = u32(vma + VMA_SHMID_OFFSET);
+	} else if (class == VMA_CLASS_FILE_PRIVATE) {
 		size_t i;
 		if (!model->page_size || pgoff > UINT64_MAX / model->page_size)
 			return -1;
@@ -2564,6 +2640,85 @@ static int emit_messages_with_raw(const char *dir, const char *name, uint32_t ma
 				records, count);
 }
 
+static void free_messages(struct image_writer *messages, size_t count);
+
+static int emit_shmem_images(const struct snapshot_model *model,
+			     const char *directory)
+{
+	size_t i, j;
+	struct image_writer *messages = NULL;
+	struct image_writer_raw_record *records = NULL;
+	size_t run_count = 0;
+
+	for (i = 0; i < model->shmem_objects.count; i++) {
+		const uint8_t *object = model->shmem_objects.items[i].data;
+		uint32_t shmid = u32(object + 4);
+		uint64_t size = u64(object + 8);
+		char name[64];
+		size_t index = 1;
+		int ret;
+
+		run_count = 0;
+		for (j = 0; j < model->shmem_page_runs.count; j++)
+			if (u32(model->shmem_page_runs.items[j].data + 4) == shmid)
+				run_count++;
+		messages = calloc(run_count + 1U, sizeof(*messages));
+		records = calloc(run_count + 1U, sizeof(*records));
+		if (!messages || !records) {
+			free(messages);
+			free(records);
+			return -1;
+		}
+		for (j = 0; j < run_count + 1U; j++)
+			image_writer_init(&messages[j]);
+		if (image_writer_field_varint(&messages[0], 1, shmid))
+			goto error;
+		records[0].message = &messages[0];
+		for (j = 0; j < model->shmem_page_runs.count; j++) {
+			const uint8_t *run = model->shmem_page_runs.items[j].data;
+			uint64_t page_index;
+			uint32_t nr_pages;
+			uint32_t data_len;
+
+			if (u32(run + 4) != shmid)
+				continue;
+			page_index = u64(run + 8);
+			nr_pages = u32(run + 16);
+			data_len = u32(run + 20);
+			if (page_index > UINT64_MAX / model->page_size ||
+			    page_index + nr_pages > (size + model->page_size - 1U) /
+			    model->page_size)
+				goto error;
+			if (image_writer_field_varint(&messages[index], 1,
+						      page_index * model->page_size) ||
+			    image_writer_field_varint(&messages[index], 2, nr_pages) ||
+			    image_writer_field_varint(&messages[index], 4,
+						      PE_PRESENT) ||
+			    image_writer_field_varint(&messages[index], 5, nr_pages))
+				goto error;
+			records[index].message = &messages[index];
+			records[index].raw = run + SHMEM_PAGE_RUN_HEADER_SIZE;
+			records[index].raw_len = data_len;
+			index++;
+		}
+		if (index != run_count + 1U)
+			goto error;
+		snprintf(name, sizeof(name), "pagemap-shmem-%u.img", shmid);
+		ret = emit_messages_with_raw(directory, name, PAGEMAP_MAGIC,
+					     records, index);
+		free_messages(messages, index);
+		free(records);
+		if (ret)
+			return -1;
+	}
+	return 0;
+
+error:
+	free_messages(messages, run_count + 1U);
+	free(records);
+	return -1;
+}
+
 static void model_view_for_process(const struct snapshot_model *base,
 				   const struct process_model *process,
 				   struct snapshot_model *view)
@@ -2578,6 +2733,8 @@ static void model_view_for_process(const struct snapshot_model *base,
 	view->vmas = process->vmas;
 	view->fds = process->fds;
 	view->pages = process->pages;
+	view->shmem_objects = base->shmem_objects;
+	view->shmem_page_runs = base->shmem_page_runs;
 	view->threads = process->threads;
 	view->pipe_endpoints = process->pipe_endpoints;
 	view->pipe_data = process->pipe_data;
@@ -3101,6 +3258,8 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 		free_messages(queues, ipc_model.socket_queues.count);
 		free(records);
 	}
+	if (emit_shmem_images(model, options->output_dir))
+		goto out_message;
 	ret = 0;
 
 out_message:
@@ -3417,6 +3576,10 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		}
 		free_messages(queues, model.socket_queues.count);
 		free(queue_records);
+	}
+	if (emit_shmem_images(&model, options->output_dir)) {
+		ret = SNAPSHOT_READER_IO_ERROR;
+		goto out_message;
 	}
 	for (i = 0; i < files.binding_count; i++) {
 		image_writer_init(&fd_messages[i]);

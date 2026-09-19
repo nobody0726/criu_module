@@ -90,6 +90,7 @@ static int scan_vma(struct mm_struct *mm, const struct criu_vma_info *vma,
 	 */
 	if (vma->special == CRIU_VMA_SPECIAL_VVAR ||
 	    vma->special == CRIU_VMA_SPECIAL_PROT_NONE ||
+	    vma->class == CRIU_VMA_ANON_SHARED ||
 	    !vma->prot || vma->dontdump)
 		return 0;
 	vdso = vma->special == CRIU_VMA_SPECIAL_VDSO;

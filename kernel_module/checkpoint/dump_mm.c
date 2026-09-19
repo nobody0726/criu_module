@@ -6,6 +6,7 @@
 #include "dump_mm.h"
 #include "page_scan.h"
 #include "criu_kernel.h"
+#include "dump_shmem.h"
 
 /* Policy rejects VM_SHARED, VM_HUGETLB, VM_IO, VM_PFNMAP and VM_MIXEDMAP
  * through the normalized class/special values produced by vma_walk.c. */
@@ -47,8 +48,11 @@ static int classify_policy(const struct criu_vma_info *vma,
 		*policy = CRIU_VMA_DUMP_SKIP_DONTDUMP;
 		return 0;
 	}
-	if (vma->class == CRIU_VMA_ANON_SHARED ||
-	    vma->class == CRIU_VMA_FILE_SHARED ||
+	if (vma->class == CRIU_VMA_ANON_SHARED) {
+		*policy = CRIU_VMA_DUMP_SHMEM;
+		return 0;
+	}
+	if (vma->class == CRIU_VMA_FILE_SHARED ||
 	    vma->class == CRIU_VMA_UNSUPPORTED)
 		return -EOPNOTSUPP;
 	if (vma->class == CRIU_VMA_ANON_PRIVATE)
@@ -62,13 +66,17 @@ static int classify_policy(const struct criu_vma_info *vma,
 
 struct dump_mm_ctx {
 	struct criu_snapshot_writer *writer;
+	struct criu_dump_shared_ctx *shared_ctx;
 };
 
 static int dump_one_vma(const struct criu_vma_info *vma, void *arg)
 {
 	struct dump_mm_ctx *ctx = arg;
 	struct criu_vma_record rec;
+	struct criu_snapshot_vma_shared_record shared_rec;
 	enum criu_vma_dump_policy policy;
+	u32 shmid = 0;
+	bool is_new = false;
 	int ret;
 
 	ret = classify_policy(vma, &policy);
@@ -79,6 +87,39 @@ static int dump_one_vma(const struct criu_vma_info *vma, void *arg)
 		return ret;
 	}
 	memset(&rec, 0, sizeof(rec));
+	memset(&shared_rec, 0, sizeof(shared_rec));
+	if (policy == CRIU_VMA_DUMP_SHMEM) {
+		struct criu_snapshot_shmem_object_record object;
+		u64 shmem_size;
+
+		if (!ctx->shared_ctx || !vma->inode)
+			return -EOPNOTSUPP;
+		shmem_size = i_size_read(vma->inode);
+		if (!shmem_size || shmem_size < vma->end - vma->start)
+			shmem_size = vma->end - vma->start;
+		ret = criu_shmem_register(ctx->shared_ctx, vma->inode,
+					  shmem_size, &shmid, &is_new);
+		if (ret)
+			return ret;
+		if (is_new) {
+			memset(&object, 0, sizeof(object));
+			object.version = cpu_to_le32(CRIU_SNAPSHOT_SHMEM_OBJECT_VERSION);
+			object.shmid = cpu_to_le32(shmid);
+			object.size = cpu_to_le64(shmem_size);
+			object.dev = cpu_to_le64(vma->dev);
+			object.ino = cpu_to_le64(vma->ino);
+			ret = criu_snapshot_writer_global_record(
+				ctx->writer, CRIU_SNAPSHOT_REC_SHMEM_OBJECT,
+				&object, sizeof(object));
+			if (ret)
+				return ret;
+			ret = criu_shmem_dump_content(ctx->shared_ctx, ctx->writer,
+						      vma->inode, shmid,
+						      shmem_size);
+			if (ret)
+				return ret;
+		}
+	}
 	rec.start = vma->start;
 	rec.end = vma->end;
 	rec.pgoff = vma->pgoff;
@@ -91,16 +132,28 @@ static int dump_one_vma(const struct criu_vma_info *vma, void *arg)
 	rec.dev = vma->dev;
 	rec.ino = vma->ino;
 	strscpy(rec.path, vma->path, sizeof(rec.path));
+	if (policy == CRIU_VMA_DUMP_SHMEM) {
+		shared_rec.base = rec;
+		shared_rec.shmid = cpu_to_le32(shmid);
+		return criu_snapshot_writer_record(ctx->writer,
+						   CRIU_SNAPSHOT_REC_VMA, 0,
+						   &shared_rec,
+						   sizeof(shared_rec));
+	}
 	return criu_snapshot_writer_record(ctx->writer, CRIU_SNAPSHOT_REC_VMA,
 					   0, &rec, sizeof(rec));
 }
 
-int criu_dump_mm(struct task_struct *task,
-		 struct criu_snapshot_writer *writer)
+static int criu_dump_mm_common(struct task_struct *task,
+			       struct criu_snapshot_writer *writer,
+			       struct criu_dump_shared_ctx *shared_ctx)
 {
 	struct criu_snapshot snapshot;
 	struct criu_mm_record rec;
-	struct dump_mm_ctx ctx = { .writer = writer };
+	struct dump_mm_ctx ctx = {
+		.writer = writer,
+		.shared_ctx = shared_ctx,
+	};
 	unsigned long i;
 	int ret;
 
@@ -146,10 +199,17 @@ int criu_dump_mm(struct task_struct *task,
 	return criu_dump_pages(task, writer);
 }
 
+int criu_dump_mm(struct task_struct *task,
+		 struct criu_snapshot_writer *writer)
+{
+	return criu_dump_mm_common(task, writer, NULL);
+}
+
 int criu_dump_mm_process(const struct criu_freeze_process_view *view,
-			 struct criu_snapshot_writer *writer)
+			 struct criu_snapshot_writer *writer,
+			 struct criu_dump_shared_ctx *shared_ctx)
 {
 	if (!view)
 		return -EINVAL;
-	return criu_dump_mm(view->leader, writer);
+	return criu_dump_mm_common(view->leader, writer, shared_ctx);
 }

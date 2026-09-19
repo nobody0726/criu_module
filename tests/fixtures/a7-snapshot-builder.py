@@ -133,6 +133,32 @@ def shared_files_process_records(pid, ppid, object_id=9001):
     return out
 
 
+def shared_memory_process_records(pid, ppid, address, shmid=77):
+    """A process record set with one anonymous MAP_SHARED VMA."""
+    records = full_process_records(pid, ppid)
+    out = []
+    for kind, payload, flags in records:
+        if kind == VMA:
+            scope = payload[:8]
+            vma = payload[8:8 + 604]
+            fields = list(struct.unpack("<3Q5I6Q512s", vma))
+            fields[0] = address
+            fields[1] = address + 0x2000
+            fields[3] = 3  # read/write
+            fields[4] = 1  # CRIU_VMA_ANON_SHARED
+            fields[8] = 0x1234  # shmem dev identity
+            fields[9] = 0x5678  # shmem inode identity
+            fields[14] = fixed_path("")
+            extended = struct.pack("<3Q5I6Q512sI", *fields, shmid)
+            out.append((kind, scope + extended, flags))
+        elif kind == PAGE:
+            # Shared payload is represented by the closure-wide shmem stream.
+            continue
+        else:
+            out.append((kind, payload, flags))
+    return out
+
+
 def ipc_process_records(pid, ppid, fd_type, object_id, extra):
     records = full_process_records(pid, ppid)
     out = []
@@ -301,6 +327,22 @@ def main(out_dir):
     ])
     (out / "a8-cross-unix.bin").write_bytes(
         build(unix, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    shmem = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 107)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 108)),
+    ]
+    shmem += shared_memory_process_records(400, 0, 0x500000)
+    shmem += shared_memory_process_records(401, 400, 0x700000)
+    shmem += [
+        (SHMEM_OBJECT,
+         struct.pack("<IIQQQII", 1, 77, 0x2000, 0x1234, 0x5678, 0, 0)),
+        (SHMEM_PAGE_RUN,
+         struct.pack("<IIQII", 1, 77, 0, 2, 8192) +
+         bytes([0xA8]) * 8192),
+    ]
+    (out / "a8-shmem-shared.bin").write_bytes(
+        build(shmem, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
     )
 
 

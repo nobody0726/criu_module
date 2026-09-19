@@ -64,6 +64,7 @@ static void fill_vma(struct vm_area_struct *vma, struct criu_vma_info *out)
 	out->dontdump = !!(vma->vm_flags & VM_DONTDUMP);
 	out->locked = !!(vma->vm_flags & VM_LOCKED);
 	out->class = vma_class(vma);
+	out->inode = vma->vm_file ? file_inode(vma->vm_file) : NULL;
 	out->special = special_kind(vma, &name);
 	if (!out->prot && out->special == CRIU_VMA_SPECIAL_NONE)
 		out->special = CRIU_VMA_SPECIAL_PROT_NONE;

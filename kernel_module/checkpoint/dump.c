@@ -319,7 +319,8 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 				ret = criu_dump_process_threads(freeze_ctx, i,
 								&writer);
 			if (!ret)
-				ret = criu_dump_mm_process(&view, &writer);
+				ret = criu_dump_mm_process(&view, &writer,
+							   &shared_ctx);
 			if (!ret)
 				ret = criu_dump_files_process(freeze_ctx, i, &view, &writer, &shared_ctx);
 			if (!ret) {
