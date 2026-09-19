@@ -517,3 +517,27 @@ CRIU 当 oracle 这个思路能给出的最大回报。
 - [ ] premap 区域与目标 VMA 的冲突检查已实现
 - [ ] `ci/zdtm-restore-allowlist.txt` 至少 3 个测试
 - [ ] 已知限制写进本文件附录:vDSO 不重定位、单线程、无 socket
+# B1 mini-restore
+
+Current implementation status:
+
+- B1 kernel-assisted restore has a locked transaction ABI and Linux 5.10.29 patch scaffold.
+- `userspace/mini-restore` now has userspace-only reader/model, validator, carrier, staging,
+  sigframe/bootstrap, and cleanup/orchestrator scaffolding.
+- The current reader accepts the B1 synthetic manifest fixtures used by contract tests. It does
+  **not yet parse real CRIU protobuf images**, so the guest gate must not print a false restore
+  PASS marker.
+
+The guest gate is `tests/b1-kernel-assisted-restore.sh`. It runs only in the Linux 5.10.29
+QEMU guest and stages all mutable work below guest-local `/tmp`. Until real CRIU protobuf image
+parsing is connected, the gate performs a real CRIU dump and then requires mini-restore to reject
+that image set with a diagnostic.
+
+The only future success marker for the live restore gate remains:
+
+```text
+B1_KERNEL_ASSISTED_RESTORE: PASS
+```
+
+Do not emit that marker until exact PID liveness, tick growth, markers/TLS/maps, and clean dmesg
+are all verified in the guest.
