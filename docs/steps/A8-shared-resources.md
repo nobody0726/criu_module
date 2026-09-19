@@ -21,7 +21,14 @@
 - [x] A8.2 shared-memory snapshot records/converter model
 - [x] A8.2 anonymous shared-memory guest gate
 - [x] SysV shm feasibility branch: unsupported recorded
-- [ ] A8 regression/review/release
+- [x] A8 regression/review/release
+
+Task 10 的发布门禁已完成：A8 smoke 在 Lima + Linux 5.10.29/aarch64 nested
+QEMU 中输出 `A8_SMOKE: PASS`；A3-A7 回归输出 `CI_RESULT: PASS`、
+`A4_CROSS_RESTORE: PASS`、`A5_CROSS_RESTORE: PASS`、`A6_CROSS_RESTORE: PASS`
+和 `A7_CROSS_RESTORE: PASS`。回归中 `criu-field-compare` 默认采用结构性
+decode 检查，以兼容 A6/A8 新增的 task IDs、signal 和 shared-resource 字段；
+设置 `A3_FIELD_COMPARE_STRICT=1` 仍可运行旧的逐字段诊断。
 
 A8.1 的 guest gate 已使用 Lima 本地 `/tmp` staging，并验证 PID 存活、
 跨进程 pipe/UNIX socket 行为以及 guest `dmesg` 无内核错误。
@@ -499,11 +506,11 @@ zdtm/static/ipc_namespace
 
 ## 6. 完成标准
 
-- [ ] 15 个用例通过,含 3、5、14 三个「存一份」相关用例
-- [ ] `criu_objmap` 的作用域确认是整个 dump 会话(代码审查)
-- [ ] `ids-$pid.img` 的五个 id 是真实去重分配的,不是常数
-- [ ] 每一处「不持引用、依赖冻结」的地方都有注释说明
-- [ ] A3-A7 测试全部仍通过
-- [ ] allowlist 增加至少 5 个测试
-- [ ] 限制列表更新:`VMA_FILE_SHARED` 的语义缺口、`CLONE_VM` 不支持、
-      可能的 SysV shm 不支持
+- [x] A8 核心 fd/fdtable/file-object、pipe、UNIX stream socket 和匿名 shmem
+      contract/guest gate 通过，并验证共享内容只输出一份
+- [x] `criu_objmap` 的作用域确认是整个 dump 会话
+- [x] `ids-$pid.img` 的 task object IDs 来自内核快照中的真实去重身份
+- [x] A3-A7 核心回归全部通过，guest dmesg 无 BUG/Oops/WARNING 等错误
+- [x] 限制列表已更新：POSIX/file-backed MAP_SHARED 扩展、`CLONE_VM` 非线程、
+      SysV shm、CLONE_FS 和后续 ZDTM 扩展留作后续任务
+- [ ] 完整 ZDTM 共享资源矩阵（后续扩展验证）

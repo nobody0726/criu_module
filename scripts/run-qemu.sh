@@ -15,7 +15,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The Lima /Users mount can expose host-native binaries to nested QEMU even
 # after an ARM64 build in Lima.  Stage the complete project on Lima-local
 # storage so the guest sees the Linux ELF artifacts produced by that build.
-QEMU_PROJECT_DIR="$(mktemp -d /tmp/criu-module-qemu.XXXXXX)"
+QEMU_PROJECT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/criu-module-qemu.XXXXXX")"
 cp -a "$PROJECT_DIR"/. "$QEMU_PROJECT_DIR"/
 # A worktree need not duplicate the untracked upstream CRIU checkout. Stage
 # only its runtime binary and Python image decoder when explicitly supplied.
@@ -30,6 +30,14 @@ if [ "$(uname -s)" = Linux ] && [ -f "$QEMU_PROJECT_DIR/userspace/Makefile" ]; t
 	# source tree mounted from macOS may contain Mach-O files even when the
 	# same path looked like an ELF during the Lima build.
 	make -C "$QEMU_PROJECT_DIR/userspace" clean all >/dev/null
+fi
+if [ "$(uname -s)" = Linux ] && [ -f "$QEMU_PROJECT_DIR/tests/progs/Makefile" ]; then
+	# The guest gates execute test fixtures from /mnt/host/tests/progs.
+	# Build them in the same Lima-local staging tree that is passed to QEMU
+	# so a fresh worktree does not depend on untracked host-side binaries.
+	make -C "$QEMU_PROJECT_DIR/tests/progs" clean all >/dev/null
+	find "$QEMU_PROJECT_DIR/tests/progs" -maxdepth 1 -type f -perm /111 \
+		-exec chmod 0755 {} +
 fi
 
 GDB=0
