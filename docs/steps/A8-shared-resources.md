@@ -2,6 +2,12 @@
 
 **工期:** 2-3 周 · **前置:** A5、A7 · **产出:** 共享内存 + 跨进程共享 fd
 
+> 当前详细设计与实施计划见:
+> [2026-09-19-a8-shared-resources-design](../plans/2026-09-19-a8-shared-resources-design.md)、
+> [2026-09-19-a8-shared-resources-implementation](../plans/2026-09-19-a8-shared-resources-implementation.md)。
+> A8 采用方案 1:先做跨进程 fd/fdtable/file-object 共享,再做匿名 `MAP_SHARED` /
+> POSIX shm。SysV shm 是可行性分支,不阻塞首个核心门禁。
+
 > 相关原理:[07-fd-and-shared-objects](../principles/07-fd-and-shared-objects.md)、
 > [03-memory-and-vma](../principles/03-memory-and-vma.md)、
 > [10-vma-semantics-and-attributes](../principles/10-vma-semantics-and-attributes.md)
@@ -19,7 +25,7 @@ A5 已经把去重的核心机制建好了:`criu_objmap_get(map, obj, &is_new)`�
 |---|---|---|
 | A5 | `struct file *` | 指针相等 |
 | A8 | `struct files_struct *`(整张 fd 表) | 指针相等 |
-| A8 | `struct mm_struct *`(整个地址空间) | 指针相等 |
+| A8 | `struct mm_struct *`(整个地址空间) | 指针相等；首个 gate 仍拒绝非线程 `CLONE_VM` |
 | A8 | shmem inode / SysV shm 段 | inode 指针相等 |
 | A8 | `struct fs_struct *`(cwd/root) | 指针相等 |
 
@@ -113,13 +119,15 @@ A8 要把它改成真正的去重分配。这是 A3「简到近乎人造」这�
 ### 2.2 SysV / POSIX 共享内存
 
 参照:
-- `criu/images/shmem.proto` —— 共享内存段的描述
+- `criu/images/vma.proto` —— `vma_entry.shmid` 描述共享内存对象引用
+- `criu/images/pagemap.proto` —— 共享内存页内容仍走 pagemap/page stream
 - `criu/images/ipc-shm.proto` —— SysV IPC 的 key/权限
 - `criu/criu/shmem.c` —— 主逻辑
 
-CRIU 的做法:每个共享内存段分配一个 `shmid`(镜像层面的 id,不是 SysV 的 shmid),
-**内容只存一份**在 pages 文件里。所有映射了它的进程的 `mm-$pid.img` 里,对应的
-VMA 用 `shmid` 引用它。
+CRIU 当前树里没有单独的 `criu/images/shmem.proto`。CRIU 的做法:每个共享内存段
+分配一个 `shmid`(镜像层面的 id,不是 SysV 的 shmid),**内容只存一份**在
+`pagemap-shmem-$shmid.img` 对应的 pages stream 里。所有映射了它的进程的
+`mm-$pid.img` 里,对应的 VMA 用 `vma_entry.shmid` 引用它。
 
 **「内容只存一份」是这一步的正确性核心。** 存多份的症状不是空间浪费,而是:
 restore 时后写入的那份覆盖先写入的那份,如果两份在 dump 期间有差异(不该有,
@@ -264,7 +272,7 @@ shmem 页在 page cache 里,直接从 `inode->i_mapping` 读:
 罕见但合法:`clone(CLONE_VM)` 不带 `CLONE_THREAD`,得到两个**共享地址空间的独立
 进程**(不是线程)。它们的 `mm` 指针相同,但 `tgid` 不同。
 
-`vm_id` 相同就正确表达了这个关系。但要注意:
+`vm_id` 相同能表达这个关系。但 A8 首个 gate 不支持它,这里只记录为什么不能误做:
 
 ```c
 	/* Two tasks sharing an mm without CLONE_THREAD are separate processes.
@@ -273,7 +281,8 @@ shmem 页在 page cache 里,直接从 `inode->i_mapping` 读:
 	 */
 ```
 
-**`mm` 存一份,寄存器每个都要。** A4 已经建立了这个划分,这里只是它的另一个入口。
+如果将来支持,**`mm` 存一份,寄存器每个都要。** A4 已经建立了这个划分,这里只是
+它的另一个入口。
 
 CRIU 对这种情况的支持是有限的(`fork_with_pid` 里有
 `BUG_ON(ca.clone_flags & CLONE_VM)`,在 `criu/criu/cr-restore.c:1189`)。
