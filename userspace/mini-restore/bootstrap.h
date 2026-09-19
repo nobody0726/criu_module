@@ -1,0 +1,15 @@
+#ifndef B1_BOOTSTRAP_H
+#define B1_BOOTSTRAP_H
+
+#include <stdint.h>
+
+struct b1_bootstrap_args {
+	uint64_t restore_fd;
+	uint64_t commit_user_ptr;
+	uint64_t sigframe_final_sp;
+	uint64_t tls;
+};
+
+void b1_restore_bootstrap_entry(const struct b1_bootstrap_args *args);
+
+#endif
