@@ -273,6 +273,9 @@ A8 的正确性依赖“共享对象的所有参与者都在 closure 内”。�
 - UNIX stream socket peer 必须在 closure 内，peer 关系对称；
 - `struct file` 引用计数出现额外 holder 时，除 regular file 外默认拒绝；
 - shmem `inode` 如果无法证明所有 mapping owner 在 closure 内，首个 gate 可以拒绝；
+- SysV shm 需要额外保存 IPC shm 元数据、权限、attach chunk 顺序和 IPC namespace
+  关系；A8 首个实现将其作为 feasibility branch，若无法完整建模则明确
+  `-EOPNOTSUPP`，不复用匿名 shmem 的简化 inode/content-only 路径；
 - freeze 后 revalidation 发现成员、fdtable、VMA、shmem object 或 refcount 关系变化时整体 abort。
 
 这延续 A5 的保守策略：明确拒绝优于生成会丢共享关系的镜像。
@@ -349,4 +352,3 @@ A8 首个发布按核心门禁判断：
 - A3-A7 核心回归仍通过；
 - 文档更新支持矩阵与后续扩展清单；
 - 不把全量 ZDTM 或 GitHub CI 作为本阶段完成阻塞，但相关失败必须分类记录。
-

@@ -20,7 +20,7 @@
 - [x] A8.1 Linux 5.10.29 guest cross-restore gate
 - [x] A8.2 shared-memory snapshot records/converter model
 - [x] A8.2 anonymous shared-memory guest gate
-- [ ] SysV shm feasibility branch
+- [x] SysV shm feasibility branch: unsupported recorded
 - [ ] A8 regression/review/release
 
 A8.1 的 guest gate 已使用 Lima 本地 `/tmp` staging，并验证 PID 存活、
@@ -31,6 +31,10 @@ A8.2 当前核心 gate 覆盖匿名 `MAP_SHARED|MAP_ANONYMOUS`：dump 侧按 shm
 和独立 `pages-$pages_id.img`，真实 CRIU restore 后父子进程仍双向可见。POSIX
 `shm_open` fixture 已加入编译目标，但普通 file-backed `MAP_SHARED` 内容仍不进入
 pages；该语义缺口继续按 A8 设计记录，不作为匿名 shmem 核心 gate 的阻塞项。
+
+SysV shm 可行性 probe 已记录为首个 A8 范围外：当前外置模块路径不能像 CRIU
+内部实现那样安全重建 SysV IPC 元数据、attach 顺序和权限，因此遇到 SysV shm
+VMA 时保持明确 unsupported，而不是复用匿名 shmem 路径生成不完整镜像。
 
 ---
 
