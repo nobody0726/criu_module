@@ -517,7 +517,7 @@ CRIU 当 oracle 这个思路能给出的最大回报。
 - [ ] premap 区域与目标 VMA 的冲突检查已实现
 - [ ] `ci/zdtm-restore-allowlist.txt` 至少 3 个测试
 - [ ] 已知限制写进本文件附录:vDSO 不重定位、单线程、无 socket
-# B1 mini-restore
+## 7. 当前实现状态（2026-09-19）
 
 Current implementation status:
 
