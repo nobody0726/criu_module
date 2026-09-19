@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/errno.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/signal.h>
 #include <linux/string.h>
 
+#include "../../include/criu_snapshot.h"
 #include "dump_shared.h"
 
 static int init_map(struct criu_objmap **map)
@@ -68,4 +71,47 @@ void criu_dump_shared_ctx_destroy(struct criu_dump_shared_ctx *ctx)
 	criu_objmap_free(ctx->files_ids);
 	criu_objmap_free(ctx->mm_ids);
 	memset(ctx, 0, sizeof(*ctx));
+}
+
+int criu_dump_task_ids_process(struct criu_dump_shared_ctx *ctx,
+			       const struct criu_freeze_process_view *view,
+			       struct criu_snapshot_writer *writer)
+{
+	struct criu_snapshot_task_ids_record rec;
+	struct mm_struct *mm;
+	struct files_struct *files;
+	struct fs_struct *fs;
+	struct sighand_struct *sighand;
+	u32 vm_id, files_id, fs_id, sighand_id;
+
+	if (!ctx || !view || !view->leader || !writer)
+		return -EINVAL;
+	mm = get_task_mm(view->leader);
+	if (!mm)
+		return -ESRCH;
+	task_lock(view->leader);
+	files = view->leader->files;
+	fs = view->leader->fs;
+	sighand = view->leader->sighand;
+	task_unlock(view->leader);
+	if (!files || !fs || !sighand) {
+		mmput(mm);
+		return -ESRCH;
+	}
+	vm_id = criu_objmap_get(ctx->mm_ids, mm, NULL);
+	files_id = criu_objmap_get(ctx->files_ids, files, NULL);
+	fs_id = criu_objmap_get(ctx->fs_ids, fs, NULL);
+	sighand_id = criu_objmap_get(ctx->sighand_ids, sighand, NULL);
+	mmput(mm);
+	if (!vm_id || !files_id || !fs_id || !sighand_id)
+		return -ENOMEM;
+	memset(&rec, 0, sizeof(rec));
+	rec.version = cpu_to_le32(CRIU_SNAPSHOT_TASK_IDS_VERSION);
+	rec.pid = cpu_to_le32(view->pid);
+	rec.vm_id = cpu_to_le32(vm_id);
+	rec.files_id = cpu_to_le32(files_id);
+	rec.fs_id = cpu_to_le32(fs_id);
+	rec.sighand_id = cpu_to_le32(sighand_id);
+	return criu_snapshot_writer_record(writer, CRIU_SNAPSHOT_REC_TASK_IDS,
+					   0, &rec, sizeof(rec));
 }

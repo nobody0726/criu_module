@@ -194,6 +194,13 @@ def main(out_dir):
     (out / "a7-full-multi.bin").write_bytes(
         build(full, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
     )
+    a8_full = tree_simple() + [
+        scoped(100, TASK_IDS, task_ids(100, 501, 77)),
+        scoped(101, TASK_IDS, task_ids(101, 502, 77)),
+    ] + full_process_records(100, 0) + full_process_records(101, 100)
+    (out / "a8-full-task-ids.bin").write_bytes(
+        build(a8_full, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
     a8_valid = a8_tree() + [
         scoped(400, TASK_IDS, task_ids(400, 400, 77)),
         scoped(401, TASK_IDS, task_ids(401, 401, 77)),

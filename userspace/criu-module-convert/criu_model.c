@@ -108,6 +108,7 @@ struct process_model {
 	uint32_t pid;
 	size_t record_count;
 	uint64_t type_mask;
+	struct blob_ref task_ids;
 	struct blob_ref task;
 	struct blob_ref mm;
 	struct blob_ref regs;
@@ -128,6 +129,7 @@ struct process_model {
 };
 
 struct snapshot_model {
+	struct blob_ref task_ids;
 	struct blob_ref task;
 	struct blob_ref mm;
 	struct blob_ref regs;
@@ -187,6 +189,13 @@ struct file_table {
 	uint32_t exe_id;
 	uint32_t cwd_id;
 	uint32_t root_id;
+};
+
+struct task_kobj_ids {
+	uint32_t vm_id;
+	uint32_t files_id;
+	uint32_t fs_id;
+	uint32_t sighand_id;
 };
 
 struct fd_object_ref {
@@ -424,6 +433,11 @@ static int collect_records(const struct snapshot_document *doc,
 		case CRIU_SNAPSHOT_REC_TASK:
 			if (set_blob(process ? &process->task : &model->task,
 				     payload, len))
+				goto format_error;
+			break;
+		case CRIU_SNAPSHOT_REC_TASK_IDS:
+			if (set_blob(process ? &process->task_ids :
+				     &model->task_ids, payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_MM:
@@ -1656,24 +1670,58 @@ static int build_x86_thread_info(const struct blob_ref *regs,
 	return ret;
 }
 
-static int build_ids(struct image_writer *message, uint32_t id)
+static void legacy_task_ids(uint32_t id, struct task_kobj_ids *out)
 {
-	return image_writer_field_varint(message, 1, id) ||
-		image_writer_field_varint(message, 2, id) ||
-		image_writer_field_varint(message, 3, id) ||
-		image_writer_field_varint(message, 4, id);
+	out->vm_id = id;
+	out->files_id = id;
+	out->fs_id = id;
+	out->sighand_id = id;
+}
+
+static int model_task_ids(const struct snapshot_model *model,
+			  uint32_t fallback_id, struct task_kobj_ids *out)
+{
+	const uint8_t *ids;
+
+	if (!model || !out)
+		return -1;
+	if (!model->task_ids.data) {
+		legacy_task_ids(fallback_id, out);
+		return 0;
+	}
+	if (model->task_ids.len != CRIU_SNAPSHOT_TASK_IDS_RECORD_SIZE)
+		return -1;
+	ids = model->task_ids.data;
+	if (u32(ids) != CRIU_SNAPSHOT_TASK_IDS_VERSION ||
+	    u32(ids + 4) != model->pid || u32(ids + 24) || u32(ids + 28))
+		return -1;
+	out->vm_id = u32(ids + 8);
+	out->files_id = u32(ids + 12);
+	out->fs_id = u32(ids + 16);
+	out->sighand_id = u32(ids + 20);
+	return out->vm_id && out->files_id && out->fs_id && out->sighand_id ?
+		0 : -1;
+}
+
+static int build_ids(struct image_writer *message,
+		     const struct task_kobj_ids *ids)
+{
+	return image_writer_field_varint(message, 1, ids->vm_id) ||
+		image_writer_field_varint(message, 2, ids->files_id) ||
+		image_writer_field_varint(message, 3, ids->fs_id) ||
+		image_writer_field_varint(message, 4, ids->sighand_id);
 }
 
 static int build_core(const struct snapshot_model *model,
 				const struct blob_ref *regs,
 				const struct blob_ref *thread_record,
 				bool leader,
-				uint32_t ids_id,
+				const struct task_kobj_ids *ids,
 				const char comm[TASK_COMM_SIZE],
 				struct image_writer *message)
 {
 	struct image_writer tc;
-	struct image_writer ids;
+	struct image_writer ids_writer;
 	struct image_writer thread_core;
 	struct image_writer arch_info;
 	struct blob_ref effective_regs = *regs;
@@ -1700,7 +1748,7 @@ static int build_core(const struct snapshot_model *model,
 		effective_regs.len = sizeof(regs_size) + regs_size + sizeof(uint64_t);
 	}
 	image_writer_init(&tc);
-	image_writer_init(&ids);
+	image_writer_init(&ids_writer);
 	image_writer_init(&thread_core);
 	image_writer_init(&arch_info);
 	ret = image_writer_field_varint(message, 1, (uint64_t)mtype);
@@ -1710,9 +1758,9 @@ static int build_core(const struct snapshot_model *model,
 		if (!ret)
 			ret = add_nested(message, 3, &tc);
 		if (!ret)
-			ret = build_ids(&ids, ids_id);
+			ret = build_ids(&ids_writer, ids);
 		if (!ret)
-			ret = add_nested(message, 4, &ids);
+			ret = add_nested(message, 4, &ids_writer);
 	}
 	if (!ret)
 		ret = build_thread_core(model, thread_record, comm, &thread_core);
@@ -1728,7 +1776,7 @@ static int build_core(const struct snapshot_model *model,
 		ret = add_nested(message, model->arch == ELF_ARCH_AARCH64 ? 8U : 2U,
 			&arch_info);
 	image_writer_free(&tc);
-	image_writer_free(&ids);
+	image_writer_free(&ids_writer);
 	image_writer_free(&thread_core);
 	image_writer_free(&arch_info);
 	return ret;
@@ -2522,6 +2570,7 @@ static void model_view_for_process(const struct snapshot_model *base,
 {
 	memset(view, 0, sizeof(*view));
 	view->task = process->task;
+	view->task_ids = process->task_ids;
 	view->mm = process->mm;
 	view->regs = process->regs;
 	view->fs = process->fs;
@@ -2641,12 +2690,15 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 		struct image_writer *page_messages = NULL;
 		uint8_t *process_page_data = NULL;
 		size_t fd_count = 0, page_count = 0, process_page_len = 0;
+		struct task_kobj_ids task_ids;
 		uint32_t id_offset;
 		uint32_t pages_id;
 		char comm[TASK_COMM_SIZE];
 
 		model_view_for_process(model, process, &view);
 		if (validate_model(&view))
+			goto out_message;
+		if (model_task_ids(&view, process->pid, &task_ids))
 			goto out_message;
 		if (build_file_table(&view, &files))
 			goto out_message;
@@ -2662,7 +2714,7 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 
 			message.len = 0;
 			if (build_core(&view, &view.regs, thread, tid == process->pid,
-				       process->pid,
+				       &task_ids,
 				       comm, &message)) {
 				file_table_free(&files);
 				goto out_message;
@@ -2764,7 +2816,7 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 		}
 		free_messages(fd_messages, files.binding_count);
 		message.len = 0;
-		if (build_ids(&message, process->pid)) {
+		if (build_ids(&message, &task_ids)) {
 			file_table_free(&files);
 			goto out_message;
 		}
@@ -2819,6 +2871,7 @@ static int emit_image_directory(const struct snapshot_document *doc,
 	struct fd_object_table fd_objects;
 	struct file_table files;
 	struct image_writer message;
+	struct task_kobj_ids task_ids;
 	struct image_writer *file_messages = NULL;
 	struct image_writer *reg_messages = NULL;
 	struct image_writer *fd_messages = NULL;
@@ -2931,13 +2984,17 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		free_messages(pstree_messages, pstree_count);
 	}
 	if (model.threads.count) {
+		if (model_task_ids(&model, 1, &task_ids)) {
+			ret = SNAPSHOT_READER_IO_ERROR;
+			goto out_message;
+		}
 		for (i = 0; i < model.threads.count; i++) {
 			const struct blob_ref *thread = &model.threads.items[i];
 			uint32_t tid = u32(thread->data);
 
 			message.len = 0;
 			if (build_core(&model, &model.regs, thread,
-				       tid == model.pid, 1, comm, &message)) {
+				       tid == model.pid, &task_ids, comm, &message)) {
 				fprintf(stderr, "converter: build_core tid=%u failed\n", tid);
 				ret = SNAPSHOT_READER_IO_ERROR;
 				goto out_message;
@@ -2951,8 +3008,12 @@ static int emit_image_directory(const struct snapshot_document *doc,
 			}
 		}
 	} else {
+		if (model_task_ids(&model, 1, &task_ids)) {
+			ret = SNAPSHOT_READER_IO_ERROR;
+			goto out_message;
+		}
 		message.len = 0;
-		if (build_core(&model, &model.regs, NULL, true, 1, comm, &message)) {
+		if (build_core(&model, &model.regs, NULL, true, &task_ids, comm, &message)) {
 			fprintf(stderr, "converter: build_core failed\n");
 			ret = SNAPSHOT_READER_IO_ERROR;
 			goto out_message;
@@ -3120,7 +3181,7 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		goto out_message;
 	}
 	message.len = 0;
-	if (build_ids(&message, 1)) {
+	if (build_ids(&message, &task_ids)) {
 		fprintf(stderr, "converter: build ids failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;

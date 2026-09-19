@@ -312,7 +312,10 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 			if (ret)
 				break;
 			criu_snapshot_writer_set_process_owner(&writer, view.pid);
-			ret = criu_dump_task_process(&view, &writer);
+			ret = criu_dump_task_ids_process(&shared_ctx, &view,
+							 &writer);
+			if (!ret)
+				ret = criu_dump_task_process(&view, &writer);
 			if (!ret)
 				ret = criu_dump_process_threads(freeze_ctx, i,
 								&writer);
