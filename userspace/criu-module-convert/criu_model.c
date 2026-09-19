@@ -2716,6 +2716,30 @@ static void a7_files_groups_free(struct a7_files_group *groups, size_t count)
 	free(groups);
 }
 
+static int append_ipc_list(struct blob_list *destination,
+			   const struct blob_list *source)
+{
+	size_t i;
+
+	for (i = 0; i < source->count; i++)
+		if (list_add(destination, source->items[i].data,
+			     source->items[i].len))
+			return -1;
+	return 0;
+}
+
+static void a7_ipc_model_free(struct snapshot_model *model)
+{
+	free(model->pipe_endpoints.items);
+	free(model->pipe_data.items);
+	free(model->unix_sockets.items);
+	free(model->socket_queues.items);
+	memset(&model->pipe_endpoints, 0, sizeof(model->pipe_endpoints));
+	memset(&model->pipe_data, 0, sizeof(model->pipe_data));
+	memset(&model->unix_sockets, 0, sizeof(model->unix_sockets));
+	memset(&model->socket_queues, 0, sizeof(model->socket_queues));
+}
+
 static int emit_group_fdinfo(const char *directory, uint32_t files_id,
 			     const struct file_table *files)
 {
@@ -2752,6 +2776,8 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 	size_t *group_index = NULL;
 	size_t group_count = 0;
 	struct file_table all_files;
+	struct snapshot_model ipc_model;
+	struct blob_ref ipc_creds = { 0 };
 	size_t file_count = 0, file_capacity = 0;
 	size_t reg_count = 0, reg_capacity = 0;
 	char name[64];
@@ -2759,6 +2785,9 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 	int ret = SNAPSHOT_READER_IO_ERROR;
 
 	memset(&all_files, 0, sizeof(all_files));
+	memset(&ipc_model, 0, sizeof(ipc_model));
+	ipc_model.arch = model->arch;
+	ipc_model.page_size = model->page_size;
 	if (mkdir(options->output_dir, 0700) < 0 && errno != EEXIST)
 		return SNAPSHOT_READER_IO_ERROR;
 	image_writer_init(&message);
@@ -2800,6 +2829,16 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 		bool found = false;
 
 		model_view_for_process(model, process, &view);
+		if (!ipc_creds.data)
+			ipc_creds = view.creds;
+		if (append_ipc_list(&ipc_model.pipe_endpoints,
+				    &view.pipe_endpoints) ||
+		    append_ipc_list(&ipc_model.pipe_data, &view.pipe_data) ||
+		    append_ipc_list(&ipc_model.unix_sockets,
+				    &view.unix_sockets) ||
+		    append_ipc_list(&ipc_model.socket_queues,
+				    &view.socket_queues))
+			goto out_message;
 		if (validate_model(&view) ||
 		    model_task_ids(&view, process->pid, &all_task_ids[i]))
 			goto out_message;
@@ -2832,7 +2871,7 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 			image_writer_init(&file_message);
 			image_writer_init(&reg_message);
 			if (build_file_entry(&groups[group].files.items[j],
-					     &view.creds, &view, &file_message) ||
+					     &view.creds, &ipc_model, &file_message) ||
 			    append_message(&file_messages, &file_count,
 					   &file_capacity, &file_message)) {
 				image_writer_free(&file_message);
@@ -2956,6 +2995,111 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 	    emit_messages(options->output_dir, "reg-files.img", REG_FILES_MAGIC,
 			  reg_messages, reg_count, false))
 		goto out_message;
+	if (ipc_model.pipe_data.count) {
+		struct image_writer *pipes = calloc(ipc_model.pipe_data.count,
+						    sizeof(*pipes));
+		struct image_writer_raw_record *records =
+			calloc(ipc_model.pipe_data.count, sizeof(*records));
+
+		if (!pipes || !records) {
+			free(pipes);
+			free(records);
+			goto out_message;
+		}
+		for (i = 0; i < ipc_model.pipe_data.count; i++) {
+			const uint8_t *record = ipc_model.pipe_data.items[i].data;
+
+			image_writer_init(&pipes[i]);
+			if (image_writer_field_varint(&pipes[i], 1, u64(record + 8)) ||
+			    image_writer_field_varint(&pipes[i], 2, u32(record + 24)) ||
+			    image_writer_field_varint(&pipes[i], 3, u64(record + 16))) {
+				free_messages(pipes, ipc_model.pipe_data.count);
+				free(records);
+				goto out_message;
+			}
+			records[i].message = &pipes[i];
+			records[i].raw = record + CRIU_SNAPSHOT_PIPE_DATA_HEADER_SIZE;
+			records[i].raw_len = u32(record + 24);
+		}
+		if (emit_messages_with_raw(options->output_dir, "pipes-data.img",
+					   PIPES_DATA_MAGIC, records,
+					   ipc_model.pipe_data.count)) {
+			free_messages(pipes, ipc_model.pipe_data.count);
+			free(records);
+			goto out_message;
+		}
+		free_messages(pipes, ipc_model.pipe_data.count);
+		free(records);
+	}
+	if (ipc_model.unix_sockets.count) {
+		struct image_writer *sockets = calloc(ipc_model.unix_sockets.count,
+						      sizeof(*sockets));
+
+		if (!sockets)
+			goto out_message;
+		for (i = 0; i < ipc_model.unix_sockets.count; i++) {
+			const uint8_t *record = ipc_model.unix_sockets.items[i].data;
+			const struct file_item *item = NULL;
+			size_t j2;
+
+			for (j2 = 0; j2 < all_files.count; j2++)
+				if (all_files.items[j2].object_id == u64(record + 8)) {
+					item = &all_files.items[j2];
+					break;
+				}
+			image_writer_init(&sockets[i]);
+			if (!item || build_unix_entry(item, &ipc_model, &ipc_creds,
+						     &sockets[i])) {
+				free_messages(sockets, ipc_model.unix_sockets.count);
+				goto out_message;
+			}
+		}
+		if (emit_messages(options->output_dir, "unixsk.img", UNIXSK_MAGIC,
+				  sockets, ipc_model.unix_sockets.count, false)) {
+			free_messages(sockets, ipc_model.unix_sockets.count);
+			goto out_message;
+		}
+		free_messages(sockets, ipc_model.unix_sockets.count);
+	}
+	if (ipc_model.socket_queues.count) {
+		struct image_writer *queues = calloc(ipc_model.socket_queues.count,
+						     sizeof(*queues));
+		struct image_writer_raw_record *records =
+			calloc(ipc_model.socket_queues.count, sizeof(*records));
+		size_t queue_count = 0;
+
+		if (!queues || !records) {
+			free(queues);
+			free(records);
+			goto out_message;
+		}
+		for (i = 0; i < ipc_model.socket_queues.count; i++) {
+			const struct blob_ref *queue = &ipc_model.socket_queues.items[i];
+
+			if (!u32(queue->data + 16))
+				continue;
+			image_writer_init(&queues[queue_count]);
+			if (build_socket_queue(&all_files, queue,
+					       &queues[queue_count])) {
+				free_messages(queues, ipc_model.socket_queues.count);
+				free(records);
+				goto out_message;
+			}
+			records[queue_count].message = &queues[queue_count];
+			records[queue_count].raw =
+				queue->data + CRIU_SNAPSHOT_SOCKET_QUEUE_HEADER_SIZE;
+			records[queue_count].raw_len = u32(queue->data + 16);
+			queue_count++;
+		}
+		if (queue_count && emit_messages_with_raw(options->output_dir,
+				"sk-queues.img", SK_QUEUES_MAGIC, records, queue_count)) {
+			free_messages(queues, ipc_model.socket_queues.count);
+			free(records);
+			goto out_message;
+		}
+		free_messages(queues, ipc_model.socket_queues.count);
+		free(records);
+	}
 	ret = 0;
 
 out_message:
@@ -2963,6 +3107,7 @@ out_message:
 	free_messages(file_messages, file_count);
 	free_messages(reg_messages, reg_count);
 	file_table_free(&all_files);
+	a7_ipc_model_free(&ipc_model);
 	a7_files_groups_free(groups, group_count);
 	free(all_task_ids);
 	free(group_index);

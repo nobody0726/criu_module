@@ -133,6 +133,27 @@ def shared_files_process_records(pid, ppid, object_id=9001):
     return out
 
 
+def ipc_process_records(pid, ppid, fd_type, object_id, extra):
+    records = full_process_records(pid, ppid)
+    out = []
+    for kind, payload, flags in records:
+        if kind != FD:
+            out.append((kind, payload, flags))
+            continue
+        scope = payload[:8]
+        fd = bytearray(payload[8:8 + 560])
+        struct.pack_into("<I", fd, 4, 0o10000 | (0o10666 if fd_type == 2 else 0))
+        struct.pack_into("<Q", fd, 8, 0)
+        struct.pack_into("<Q", fd, 16, 0)
+        struct.pack_into("<Q", fd, 24, 0)
+        struct.pack_into("<Q", fd, 32, object_id)
+        fd[48:560] = fixed_path("")
+        fd += struct.pack("<QII", object_id, fd_type, 0)
+        out.append((kind, scope + bytes(fd), flags))
+    out.extend(extra)
+    return out
+
+
 def build(records, flags=PSTREE_FLAG):
     body = b"".join(tlv(*record) for record in records) + tlv(END, b"")
     total = HEADER + len(body) + FOOTER
@@ -249,6 +270,37 @@ def main(out_dir):
     distinct += shared_files_process_records(401, 400, object_id=9100)
     (out / "a8-shared-file-object.bin").write_bytes(
         build(distinct, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    pipe = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 87)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 88)),
+    ]
+    pipe += ipc_process_records(400, 0, 2, 5001, [
+        scoped(400, 11, struct.pack("<IIQQII", 1, 0, 5001, 700, 1, 0)),
+        scoped(400, 12, struct.pack("<IIQQII", 1, 0, 700, 4096, 5, 0) + b"hello"),
+    ])
+    pipe += ipc_process_records(401, 400, 2, 5002, [
+        scoped(401, 11, struct.pack("<IIQQII", 1, 0, 5002, 700, 2, 0)),
+    ])
+    (out / "a8-cross-pipe.bin").write_bytes(
+        build(pipe, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    unix = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 97)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 98)),
+    ]
+    unix += ipc_process_records(400, 0, 3, 6001, [
+        scoped(400, 13, struct.pack("<IIQQIIIIQ", 1, 0, 6001, 6002,
+                                    1, 1, 1, 0, (212992 << 32) | 212992)),
+        scoped(400, 14, struct.pack("<IIQIIQ", 1, 0, 6001, 5, 0, 0) + b"hello"),
+    ])
+    unix += ipc_process_records(401, 400, 3, 6002, [
+        scoped(401, 13, struct.pack("<IIQQIIIIQ", 1, 0, 6002, 6001,
+                                    1, 1, 1, 0, (212992 << 32) | 212992)),
+        scoped(401, 14, struct.pack("<IIQIIQ", 1, 0, 6002, 5, 0, 0) + b"world"),
+    ])
+    (out / "a8-cross-unix.bin").write_bytes(
+        build(unix, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
     )
 
 

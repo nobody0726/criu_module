@@ -45,7 +45,7 @@ static int path_text(const struct path *path, char *out, size_t size)
  * Each local descriptor has its original and our pinned reference. */
 static int validate_ipc_scope(struct file **snapshot, unsigned int count)
 {
-	unsigned int i, j, readers, writers;
+	unsigned int i, j, refs, readers, writers;
 
 	for (i = 0; i < count; i++) {
 		struct file *file = snapshot[i];
@@ -54,6 +54,12 @@ static int validate_ipc_scope(struct file **snapshot, unsigned int count)
 		if (!file || (!S_ISFIFO(file_inode(file)->i_mode) &&
 			      !S_ISSOCK(file_inode(file)->i_mode)))
 			continue;
+		refs = 0;
+		for (j = 0; j < count; j++)
+			if (snapshot[j] == file)
+				refs++;
+		if (file_count(file) != 2UL * refs)
+			return -EOPNOTSUPP;
 		if (!S_ISFIFO(file_inode(file)->i_mode))
 			continue;
 		if (file_inode(file)->i_sb->s_magic != PIPEFS_MAGIC)
