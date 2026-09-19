@@ -104,6 +104,11 @@ struct blob_list {
 	size_t capacity;
 };
 
+struct process_model {
+	uint32_t pid;
+	size_t record_count;
+};
+
 struct snapshot_model {
 	struct blob_ref task;
 	struct blob_ref mm;
@@ -127,6 +132,11 @@ struct snapshot_model {
 	uint32_t pid;
 	uint32_t tgid;
 	bool signal_timers;
+	bool pstree;
+	struct criu_snapshot_pstree_record *pstree_records;
+	size_t pstree_count;
+	struct process_model *processes;
+	size_t process_count;
 };
 
 struct file_item {
@@ -224,7 +234,32 @@ static void model_free(struct snapshot_model *model)
 	free(model->unix_sockets.items);
 	free(model->socket_queues.items);
 	free(model->signal_queues.items);
+	free(model->pstree_records);
+	free(model->processes);
 	memset(model, 0, sizeof(*model));
+}
+
+static int process_model_touch(struct snapshot_model *model, uint32_t pid)
+{
+	struct process_model *processes;
+	size_t i;
+
+	if (!pid)
+		return -1;
+	for (i = 0; i < model->process_count; i++)
+		if (model->processes[i].pid == pid) {
+			model->processes[i].record_count++;
+			return 0;
+		}
+	processes = realloc(model->processes,
+			    (model->process_count + 1U) * sizeof(*processes));
+	if (!processes)
+		return -1;
+	model->processes = processes;
+	model->processes[model->process_count].pid = pid;
+	model->processes[model->process_count].record_count = 1;
+	model->process_count++;
+	return 0;
 }
 
 static int list_add(struct blob_list *list, const uint8_t *data, size_t len)
@@ -273,16 +308,20 @@ static int collect_records(const struct snapshot_document *doc,
 	model->tgid = u32(doc->data + 28);
 	model->signal_timers =
 		(u16(doc->data + 14) & CRIU_SNAPSHOT_F_SIGNAL_TIMERS) != 0;
+	model->pstree =
+		(u16(doc->data + 14) & CRIU_SNAPSHOT_F_PSTREE) != 0;
 	end = doc->size - CRIU_SNAPSHOT_FOOTER_SIZE;
 	while (off < end) {
-		uint16_t type;
+		uint16_t type, flags;
 		uint64_t raw_len;
 		size_t len;
 		const uint8_t *payload;
+		uint32_t owner = model->pid;
 
 		if (end - off < CRIU_SNAPSHOT_TLV_HEADER_SIZE)
 			goto format_error;
 		type = u16(doc->data + off);
+		flags = u16(doc->data + off + 2);
 		raw_len = u64(doc->data + off + 8);
 		if (raw_len > SIZE_MAX || raw_len > end - off -
 			CRIU_SNAPSHOT_TLV_HEADER_SIZE)
@@ -292,7 +331,36 @@ static int collect_records(const struct snapshot_document *doc,
 		payload = doc->data + off;
 		if (type == CRIU_SNAPSHOT_REC_END)
 			break;
+		if (flags & CRIU_SNAPSHOT_TLV_F_PROCESS_SCOPE) {
+			if (len < CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE)
+				goto format_error;
+			owner = u32(payload);
+			payload += CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE;
+			len -= CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE;
+			if (process_model_touch(model, owner))
+				goto io_error;
+		}
+		if (model->pstree && owner != model->pid &&
+		    type != CRIU_SNAPSHOT_REC_PSTREE) {
+			off += (size_t)raw_len;
+			continue;
+		}
 		switch (type) {
+		case CRIU_SNAPSHOT_REC_PSTREE:
+			if (len != CRIU_SNAPSHOT_PSTREE_RECORD_SIZE)
+				goto format_error;
+			{
+				struct criu_snapshot_pstree_record *records;
+
+				records = realloc(model->pstree_records,
+					(model->pstree_count + 1U) * sizeof(*records));
+				if (!records)
+					goto io_error;
+				model->pstree_records = records;
+				memcpy(&records[model->pstree_count++],
+				       payload, sizeof(*records));
+			}
+			break;
 		case CRIU_SNAPSHOT_REC_TASK:
 			if (set_blob(&model->task, payload, len))
 				goto format_error;
@@ -2131,16 +2199,32 @@ static int build_inventory(struct image_writer *message)
 }
 
 static int build_pstree(const struct snapshot_model *model,
-			struct image_writer *message)
+			struct image_writer *message, size_t index)
 {
-	uint32_t pid = u32(model->task.data);
+	uint32_t pid;
+	uint32_t ppid = 0, pgid, sid;
 	size_t i;
 
+	if (model->pstree_count) {
+		const struct criu_snapshot_pstree_record *record =
+			&model->pstree_records[index];
+
+		pid = u32((const uint8_t *)&record->pid);
+		ppid = u32((const uint8_t *)&record->ppid);
+		pgid = u32((const uint8_t *)&record->pgid);
+		sid = u32((const uint8_t *)&record->sid);
+	} else {
+		pid = u32(model->task.data);
+		pgid = pid;
+		sid = pid;
+	}
 	if (image_writer_field_varint(message, 1, pid) ||
-		image_writer_field_varint(message, 2, 0) ||
-		image_writer_field_varint(message, 3, pid) ||
-		image_writer_field_varint(message, 4, pid))
+		image_writer_field_varint(message, 2, ppid) ||
+		image_writer_field_varint(message, 3, pgid) ||
+		image_writer_field_varint(message, 4, sid))
 		return -1;
+	if (model->pstree_count)
+		return image_writer_field_varint(message, 5, pid);
 	if (model->threads.count) {
 		for (i = 0; i < model->threads.count; i++)
 			if (image_writer_field_varint(message, 5,
@@ -2365,16 +2449,32 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		goto out_message;
 	}
 	message.len = 0;
-	if (build_pstree(&model, &message)) {
-		fprintf(stderr, "converter: build_pstree failed\n");
-		ret = SNAPSHOT_READER_IO_ERROR;
-		goto out_message;
-	}
 	fprintf(stderr, "converter: emit pstree.img\n");
-	if (emit_messages(options->output_dir, "pstree.img", PSTREE_MAGIC,
-			&message, 1, false)) {
-		ret = SNAPSHOT_READER_IO_ERROR;
-		goto out_message;
+	{
+		size_t pstree_count = model.pstree_count ? model.pstree_count : 1;
+		struct image_writer *pstree_messages =
+			calloc(pstree_count, sizeof(*pstree_messages));
+
+		if (!pstree_messages) {
+			ret = SNAPSHOT_READER_IO_ERROR;
+			goto out_message;
+		}
+		for (i = 0; i < pstree_count; i++) {
+			image_writer_init(&pstree_messages[i]);
+			if (build_pstree(&model, &pstree_messages[i],
+					 model.pstree_count ? i : 0)) {
+				free_messages(pstree_messages, pstree_count);
+				ret = SNAPSHOT_READER_IO_ERROR;
+				goto out_message;
+			}
+		}
+		if (emit_messages(options->output_dir, "pstree.img", PSTREE_MAGIC,
+				  pstree_messages, pstree_count, false)) {
+			free_messages(pstree_messages, pstree_count);
+			ret = SNAPSHOT_READER_IO_ERROR;
+			goto out_message;
+		}
+		free_messages(pstree_messages, pstree_count);
 	}
 	if (model.threads.count) {
 		for (i = 0; i < model.threads.count; i++) {
