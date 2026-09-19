@@ -18,6 +18,8 @@ import sys
 PAGE_SIZE = 4096
 ABI_VERSION = 1
 MAX_VMAS = 4096
+KNOWN_PLAN_FLAGS = 1 << 0
+KNOWN_VMA_FLAGS = (1 << 0) | (1 << 1) | (1 << 2)
 
 
 class VmaKind(enum.IntEnum):
@@ -59,7 +61,7 @@ class Plan:
 
 
 def valid_fixture() -> tuple[Plan, list[Vma]]:
-    return Plan(), [Vma(staging_start=0x6000000000, target_start=0x4000000000, length=PAGE_SIZE)]
+    return Plan(), [Vma(staging_start=0x6000000000, target_start=0x4000000000, length=PAGE_SIZE * 4)]
 
 
 def validate(plan: Plan, vmas: list[Vma]) -> list[str]:
@@ -72,10 +74,28 @@ def validate(plan: Plan, vmas: list[Vma]) -> list[str]:
         errors.append("missing target_pid")
     if plan.vma_count != len(vmas):
         errors.append("vma_count mismatch")
+    if plan.vma_count == 0:
+        errors.append("zero vma_count")
     if plan.vma_count > MAX_VMAS:
         errors.append("too many vmas")
     if plan.reserved0:
         errors.append("reserved0 must be zero")
+    if plan.flags & ~KNOWN_PLAN_FLAGS:
+        errors.append("unsupported plan flags")
+    if not plan.vmas_user_ptr:
+        errors.append("missing vmas_user_ptr")
+    if plan.bootstrap_code_start % PAGE_SIZE or plan.bootstrap_code_end % PAGE_SIZE:
+        errors.append("bootstrap code not page aligned")
+    if plan.bootstrap_stack_start % PAGE_SIZE or plan.bootstrap_stack_end % PAGE_SIZE:
+        errors.append("bootstrap stack not page aligned")
+    if not plan.bootstrap_code_start < plan.bootstrap_code_end:
+        errors.append("bad bootstrap code range")
+    if not plan.bootstrap_stack_start < plan.bootstrap_stack_end:
+        errors.append("bad bootstrap stack range")
+    if not plan.bootstrap_code_start <= plan.bootstrap_pc < plan.bootstrap_code_end:
+        errors.append("bootstrap_pc outside bootstrap code")
+    if not plan.bootstrap_stack_start < plan.bootstrap_sp <= plan.bootstrap_stack_end:
+        errors.append("bootstrap_sp outside bootstrap stack")
 
     seen: list[tuple[int, int]] = []
     for i, vma in enumerate(vmas):
@@ -96,11 +116,18 @@ def validate(plan: Plan, vmas: list[Vma]) -> list[str]:
             errors.append(f"vma {i}: target overflow")
         if vma.kind not in set(item.value for item in VmaKind):
             errors.append(f"vma {i}: unsupported kind")
+        if vma.flags & ~KNOWN_VMA_FLAGS:
+            errors.append(f"vma {i}: unsupported flags")
         interval = (vma.target_start, target_end)
         for old_start, old_end in seen:
             if interval[0] < old_end and old_start < interval[1]:
                 errors.append(f"vma {i}: duplicate target interval")
         seen.append(interval)
+    if vmas:
+        if not any(v.staging_start < plan.sigframe_staging_sp <= v.staging_start + v.length for v in vmas):
+            errors.append("sigframe_staging_sp outside staging VMAs")
+        if not any(v.target_start < plan.sigframe_final_sp <= v.target_start + v.length for v in vmas):
+            errors.append("sigframe_final_sp outside target VMAs")
     return errors
 
 
@@ -112,8 +139,23 @@ def emit(name: str) -> int:
         plan = dataclasses.replace(plan, version=2)
     elif name == "bad-size":
         plan = dataclasses.replace(plan, size=96)
+    elif name == "zero-vmas":
+        plan = dataclasses.replace(plan, vma_count=0)
+        vmas = []
     elif name == "zero-target-pid":
         plan = dataclasses.replace(plan, target_pid=0)
+    elif name == "bad-plan-flags":
+        plan = dataclasses.replace(plan, flags=0x80000000)
+    elif name == "bad-vma-flags":
+        vmas = [dataclasses.replace(vmas[0], flags=0x80000000)]
+    elif name == "bad-bootstrap-pc":
+        plan = dataclasses.replace(plan, bootstrap_pc=plan.bootstrap_code_end)
+    elif name == "bad-bootstrap-sp":
+        plan = dataclasses.replace(plan, bootstrap_sp=plan.bootstrap_stack_start)
+    elif name == "bad-sigframe-staging":
+        plan = dataclasses.replace(plan, sigframe_staging_sp=0x12345000)
+    elif name == "bad-sigframe-final":
+        plan = dataclasses.replace(plan, sigframe_final_sp=0x12345000)
     elif name == "too-many-vmas":
         plan = dataclasses.replace(plan, vma_count=MAX_VMAS + 1)
         vmas = [

@@ -99,7 +99,7 @@
  obj-$(CONFIG_MODULES) += kmod.o
 --- a/kernel/criu_restore.c
 +++ b/kernel/criu_restore.c
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,337 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Minimal CRIU restore transaction device for the criu_module B1 track.
@@ -162,6 +162,81 @@
 +	       kind == CRIU_RESTORE_VMA_VDSO;
 +}
 +
++static bool criu_restore_in_range(__u64 value, __u64 start, __u64 length)
++{
++	if (start + length <= start)
++		return false;
++	return value > start && value <= start + length;
++}
++
++static bool criu_restore_in_half_open_range(__u64 value, __u64 start,
++					    __u64 end)
++{
++	if (end <= start)
++		return false;
++	return value >= start && value < end;
++}
++
++static int criu_restore_validate_bootstrap(const struct criu_restore_plan_v1 *plan)
++{
++	if (plan->bootstrap_code_start & ~PAGE_MASK ||
++	    plan->bootstrap_code_end & ~PAGE_MASK ||
++	    plan->bootstrap_stack_start & ~PAGE_MASK ||
++	    plan->bootstrap_stack_end & ~PAGE_MASK)
++		return -EINVAL;
++	if (plan->bootstrap_code_end <= plan->bootstrap_code_start ||
++	    plan->bootstrap_stack_end <= plan->bootstrap_stack_start)
++		return -EINVAL;
++	if (!criu_restore_in_half_open_range(plan->bootstrap_pc,
++					     plan->bootstrap_code_start,
++					     plan->bootstrap_code_end))
++		return -EINVAL;
++	if (!criu_restore_in_range(plan->bootstrap_sp,
++				   plan->bootstrap_stack_start,
++				   plan->bootstrap_stack_end -
++				   plan->bootstrap_stack_start))
++		return -EINVAL;
++	return 0;
++}
++
++static bool criu_restore_sp_in_staging_vmas(const struct criu_restore_plan_v1 *plan,
++					   const struct criu_restore_vma_v1 *vmas,
++					   __u64 sp)
++{
++	u32 i;
++
++	for (i = 0; i < plan->vma_count; i++)
++		if (criu_restore_in_range(sp, vmas[i].staging_start,
++					  vmas[i].length))
++			return true;
++	return false;
++}
++
++static bool criu_restore_sp_in_target_vmas(const struct criu_restore_plan_v1 *plan,
++					  const struct criu_restore_vma_v1 *vmas,
++					  __u64 sp)
++{
++	u32 i;
++
++	for (i = 0; i < plan->vma_count; i++)
++		if (criu_restore_in_range(sp, vmas[i].target_start,
++					  vmas[i].length))
++			return true;
++	return false;
++}
++
++static int criu_restore_validate_sigframe(const struct criu_restore_plan_v1 *plan,
++					 const struct criu_restore_vma_v1 *vmas)
++{
++	if (!criu_restore_sp_in_staging_vmas(plan, vmas,
++					     plan->sigframe_staging_sp))
++		return -EINVAL;
++	if (!criu_restore_sp_in_target_vmas(plan, vmas,
++					    plan->sigframe_final_sp))
++		return -EINVAL;
++	return 0;
++}
++
 +static int criu_restore_validate_vmas(const struct criu_restore_plan_v1 *plan,
 +				      const struct criu_restore_vma_v1 *vmas)
 +{
@@ -209,8 +284,15 @@
 +	    !plan.target_pid ||
 +	    plan.reserved0)
 +		return -EINVAL;
++	if (!plan.vmas_user_ptr)
++		return -EINVAL;
++	if (!current->mm)
++		return -EINVAL;
 +	if (!plan.vma_count || plan.vma_count > CRIU_RESTORE_MAX_VMAS)
 +		return -EINVAL;
++	ret = criu_restore_validate_bootstrap(&plan);
++	if (ret)
++		return ret;
 +	if (check_mul_overflow((size_t)plan.vma_count, sizeof(*vmas), &bytes))
 +		return -EINVAL;
 +
@@ -224,6 +306,9 @@
 +	}
 +
 +	ret = criu_restore_validate_vmas(&plan, vmas);
++	if (ret)
++		goto out_free;
++	ret = criu_restore_validate_sigframe(&plan, vmas);
 +	if (ret)
 +		goto out_free;
 +
