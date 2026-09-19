@@ -10,11 +10,9 @@
 @@ -5795,3 +5797,180 @@
  EXPORT_SYMBOL_GPL(criu_cgroup_freeze_threadgroup);
  
-+static void criu_freezer_end_process_changes(struct task_struct **leaders,
-+					     unsigned int count)
++static void criu_freezer_end_process_changes(struct task_struct *leader)
 +{
-+	while (count)
-+		cgroup_threadgroup_change_end(leaders[--count]);
++	cgroup_threadgroup_change_end(leader);
 +}
 +
 +static int criu_freezer_thaw_process_set(struct criu_freezer_cookie *ctx)
@@ -24,8 +22,7 @@
 +	unsigned int i;
 +	int ret = 0;
 +
-+	for (i = 0; i < ctx->leader_count; i++)
-+		cgroup_threadgroup_change_begin(ctx->leaders[i]);
++	cgroup_threadgroup_change_begin(ctx->leaders[0]);
 +	mutex_lock(&cgroup_mutex);
 +	cgroup_freeze(temporary, false);
 +	for (i = ctx->leader_count; i; i--) {
@@ -36,7 +33,7 @@
 +	if (ret)
 +		cgroup_freeze(temporary, true);
 +	mutex_unlock(&cgroup_mutex);
-+	criu_freezer_end_process_changes(ctx->leaders, ctx->leader_count);
++	criu_freezer_end_process_changes(ctx->leaders[0]);
 +	if (ret)
 +		return ret;
 +
@@ -85,8 +82,7 @@
 +		return -ENOMEM;
 +	}
 +	ctx->leader_count = leader_count;
-+	for (i = 0; i < leader_count; i++)
-+		cgroup_threadgroup_change_begin(leaders[i]);
++	cgroup_threadgroup_change_begin(leaders[0]);
 +
 +	mutex_lock(&cgroup_mutex);
 +	spin_lock_irq(&css_set_lock);
@@ -164,7 +160,7 @@
 +	for (i = 0; i < leader_count; i++)
 +		get_task_struct(ctx->leaders[i]);
 +	*cookie = ctx;
-+	criu_freezer_end_process_changes(leaders, leader_count);
++	criu_freezer_end_process_changes(leaders[0]);
 +	return 0;
 +
 +out_temporary:
@@ -172,7 +168,7 @@
 +	cgroup_put(temporary);
 +out_original_unlocked:
 +	cgroup_put(original);
-+	criu_freezer_end_process_changes(leaders, leader_count);
++	criu_freezer_end_process_changes(leaders[0]);
 +	kfree(ctx->leaders);
 +	kfree(ctx);
 +	return ret;
@@ -180,7 +176,7 @@
 +	cgroup_put(original);
 +out_unlock:
 +	mutex_unlock(&cgroup_mutex);
-+	criu_freezer_end_process_changes(leaders, leader_count);
++	criu_freezer_end_process_changes(leaders[0]);
 +	kfree(ctx->leaders);
 +	kfree(ctx);
 +	return ret;

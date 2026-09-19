@@ -21,6 +21,22 @@ grep -q 'cgroup_freeze(temporary, true)' "$patch2"
 grep -q 'while (attached)' "$patch2"
 grep -q 'criu_freezer_thaw_process_set' "$patch2"
 grep -q '0002-criu-cgroup-process-set-freezer.patch' "$apply"
+python3 - "$patch2" <<'PY'
+from pathlib import Path
+import sys
+
+patch = Path(sys.argv[1]).read_text()
+begin = patch.count('cgroup_threadgroup_change_begin(')
+end = patch.count('cgroup_threadgroup_change_end(')
+if begin != 2:
+    raise SystemExit(f'process-set wrapper must acquire cgroup_threadgroup_rwsem once per freeze/thaw path, found {begin}')
+if end != 1:
+    raise SystemExit(f'process-set wrapper must centralize cgroup_threadgroup_rwsem release in one helper, found {end}')
+if 'cgroup_threadgroup_change_begin(leaders[i])' in patch:
+    raise SystemExit('process-set wrapper must not recursively acquire threadgroup rwsem per leader')
+if 'cgroup_threadgroup_change_begin(ctx->leaders[i])' in patch:
+    raise SystemExit('process-set thaw must not recursively acquire threadgroup rwsem per leader')
+PY
 
 if rg -n '\bcgroup_attach_task\b|\bcgroup_freeze\b' "$root_dir/kernel_module" \
 	--glob '*.c' --glob '*.h'; then
