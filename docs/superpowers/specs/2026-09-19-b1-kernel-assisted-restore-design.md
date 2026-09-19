@@ -242,6 +242,17 @@ struct criu_restore_plan_v1 {
 - 所有地址和长度使用 `__u64`，内核内部再做架构相关范围检查；
 - ABI version/size/最大数量检查先于任何地址空间操作。
 
+`include/criu_restore_abi.h` 是此事务的固定 ABI：`VALIDATE` 使用
+`struct criu_restore_plan_v1`，其中 `vmas_user_ptr` 只在 ioctl 执行期间有效；内核
+必须复制 plan 和其固定宽度 VMA 数组到 per-open transaction。`COMMIT` 使用单独的
+`struct criu_restore_commit_v1`，它只含 version、size、flags 和 reserved 字段，不能
+携带 VMA、地址、路径或任何用户指针。COMMIT 只能读取 transaction 已拥有的副本。
+
+未知 ABI version、过小结构、零 `target_pid`、未对齐或溢出的 VMA 区间、重复 target
+和超过 `CRIU_RESTORE_MAX_VMAS` 的输入必须在 `VALIDATE` 返回 `-EINVAL`；已知但不在
+B1 gate 内的 VMA kind、flags 或语义必须返回 `-EOPNOTSUPP`。这一边界不允许内核解析
+protobuf，也不允许将不支持的恢复伪装为成功。
+
 ### 5.3 权限与能力
 
 设备节点只允许受控 restore 用户打开；实现至少要求 `CAP_SYS_ADMIN`，并在
