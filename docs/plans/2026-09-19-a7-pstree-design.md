@@ -73,6 +73,7 @@ Linux 没有把任意进程加入已有 session 的系统调用。`setsid()` 只
 
 - root 或 descendant 位于不同 PID namespace；
 - 控制调用者和目标 active PID namespace 不同；
+- closure 内 process leaders 位于多个原始 cgroup v2 路径；A7 首个 gate 只接受一个可由现有 cookie ABI 整体恢复的原始 cgroup；
 - closure 外的 session leader 或 process-group leader；
 - 需要 TASK_HELPER 才能构造的 session/pgid 拓扑；
 - 跨进程 `CLONE_VM`（非 `CLONE_THREAD`）；
@@ -154,6 +155,8 @@ wrapper 内部负责：
 - 发起一次 freeze；
 - 中途失败时反向恢复已移动成员、删除 child、释放引用；
 - thaw 时整体解冻、恢复每个 process 的原始 cgroup、删除 child；失败时保留 cookie 供重试。
+
+A7 首个 gate 要求 closure 内所有 process leaders 在冻结前属于同一个原始 cgroup v2 路径。发现多个原始路径时返回 `UNSUPPORTED`；跨 cgroup 的逐进程 cookie 和恢复顺序留给后续扩展，不在本 gate 中伪造成功。
 
 模块不得直接调用 `cgroup_attach_task()`、`cgroup_freeze()` 或 cgroup 内部 helper；这些操作继续封装在 patched Linux 5.10.29 kernel core 中。
 
