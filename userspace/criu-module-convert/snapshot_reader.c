@@ -40,7 +40,136 @@ static uint32_t le32(const uint8_t *p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(
 static uint64_t le64(const uint8_t *p){return (uint64_t)le32(p)|(uint64_t)le32(p+4)<<32;}
 static int known_type(uint16_t t)
 {
-	return t >= CRIU_SNAPSHOT_REC_TASK && t <= CRIU_SNAPSHOT_REC_POSIX_TIMERS;
+	return t >= CRIU_SNAPSHOT_REC_TASK && t <= CRIU_SNAPSHOT_REC_PSTREE;
+}
+
+static int process_scoped_type(uint16_t type)
+{
+	switch (type) {
+	case CRIU_SNAPSHOT_REC_TASK:
+	case CRIU_SNAPSHOT_REC_REGS:
+	case CRIU_SNAPSHOT_REC_CREDS:
+	case CRIU_SNAPSHOT_REC_THREAD:
+	case CRIU_SNAPSHOT_REC_MM:
+	case CRIU_SNAPSHOT_REC_VMA:
+	case CRIU_SNAPSHOT_REC_PAGE_RUN:
+	case CRIU_SNAPSHOT_REC_FD:
+	case CRIU_SNAPSHOT_REC_FS:
+	case CRIU_SNAPSHOT_REC_PIPE_ENDPOINT:
+	case CRIU_SNAPSHOT_REC_PIPE_DATA:
+	case CRIU_SNAPSHOT_REC_UNIX_SOCKET:
+	case CRIU_SNAPSHOT_REC_SOCKET_QUEUE:
+	case CRIU_SNAPSHOT_REC_SIGACTION:
+	case CRIU_SNAPSHOT_REC_SIGNAL_QUEUE:
+	case CRIU_SNAPSHOT_REC_ITIMERS:
+	case CRIU_SNAPSHOT_REC_POSIX_TIMERS:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int validate_process_owner(uint16_t type, uint32_t owner,
+				  const uint8_t *payload, size_t len)
+{
+	if (!owner)
+		return 0;
+	if (type == CRIU_SNAPSHOT_REC_TASK)
+		return len >= 12 && le32(payload) == owner && le32(payload + 4) == owner;
+	if (type == CRIU_SNAPSHOT_REC_THREAD)
+		return len >= 8 && le32(payload + 4) == owner;
+	return 1;
+}
+
+static int validate_pstree(const uint8_t *p, size_t len, int *unsupported)
+{
+	uint32_t flags, pid, tgid, ppid, pgid, sid, leader;
+	int32_t born_sid;
+
+	if (len != CRIU_SNAPSHOT_PSTREE_RECORD_SIZE ||
+	    le32(p) != CRIU_SNAPSHOT_PSTREE_VERSION || le32(p + 44))
+		return 0;
+	flags = le32(p + 4);
+	if (flags & ~(CRIU_SNAPSHOT_PSTREE_F_ROOT |
+			      CRIU_SNAPSHOT_PSTREE_F_EXTERNAL_PARENT |
+			      CRIU_SNAPSHOT_PSTREE_F_SESSION_LEADER |
+			      CRIU_SNAPSHOT_PSTREE_F_PGRP_LEADER))
+		return 0;
+	if (le32(p + 40) != CRIU_SNAPSHOT_PSTREE_NAMESPACE_CURRENT) {
+		if (unsupported)
+			*unsupported = 1;
+		return 0;
+	}
+	pid = le32(p + 8); tgid = le32(p + 12); ppid = le32(p + 16);
+	pgid = le32(p + 20); sid = le32(p + 24);
+	born_sid = (int32_t)le32(p + 28); leader = le32(p + 32);
+	if (!pid || pid != tgid || pid != leader || !pgid || !sid ||
+	    !le32(p + 36))
+		return 0;
+	if (!(flags & CRIU_SNAPSHOT_PSTREE_F_ROOT) && !ppid)
+		return 0;
+	if ((flags & CRIU_SNAPSHOT_PSTREE_F_ROOT) && ppid)
+		return 0;
+	if ((flags & CRIU_SNAPSHOT_PSTREE_F_EXTERNAL_PARENT) &&
+	    !(flags & CRIU_SNAPSHOT_PSTREE_F_ROOT))
+		return 0;
+	if ((flags & CRIU_SNAPSHOT_PSTREE_F_SESSION_LEADER) != (pid == sid ?
+			CRIU_SNAPSHOT_PSTREE_F_SESSION_LEADER : 0) ||
+	    (flags & CRIU_SNAPSHOT_PSTREE_F_PGRP_LEADER) != (pid == pgid ?
+			CRIU_SNAPSHOT_PSTREE_F_PGRP_LEADER : 0))
+		return 0;
+	if (born_sid < -1)
+		return 0;
+	return 1;
+}
+
+struct pstree_item {
+	uint32_t pid, ppid, pgid, sid;
+	int32_t born_sid;
+	uint32_t flags;
+};
+
+static int pstree_index(const struct pstree_item *items, size_t count,
+			uint32_t pid)
+{
+	size_t i;
+	for (i = 0; i < count; i++)
+		if (items[i].pid == pid)
+			return (int)i;
+	return -1;
+}
+
+static int validate_pstree_table(const struct pstree_item *items, size_t count)
+{
+	size_t i, root_count = 0;
+
+	if (!count)
+		return 0;
+	for (i = 0; i < count; i++) {
+		size_t steps = 0;
+		uint32_t parent = items[i].ppid;
+		if (items[i].flags & CRIU_SNAPSHOT_PSTREE_F_ROOT)
+			root_count++;
+		if (!(items[i].flags & CRIU_SNAPSHOT_PSTREE_F_ROOT) &&
+		    pstree_index(items, count, parent) < 0)
+			return 0;
+		if (pstree_index(items, count, items[i].pgid) < 0 ||
+		    pstree_index(items, count, items[i].sid) < 0)
+			return 0;
+		if (items[i].born_sid >= 0 &&
+		    pstree_index(items, count, (uint32_t)items[i].born_sid) < 0)
+			return 0;
+		while (parent) {
+			int parent_index;
+			if (++steps > count)
+				return 0;
+			parent_index = pstree_index(items, count, parent);
+			if (parent_index < 0)
+				break;
+			parent = items[parent_index].ppid;
+		}
+	}
+	return root_count == 1;
 }
 
 struct a6_queue_group {
@@ -200,8 +329,10 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 	int fd; struct stat st; size_t got=0, off, body_end; uint32_t count=0; int saw_end=0;
 	uint8_t digest[32]; struct sha256 sha; uint64_t expected; uint16_t header_flags;
 	int has_sigactions = 0, has_itimers = 0, has_posix = 0, has_shared = 0, has_private = 0;
+	int has_pstree = 0;
 	struct a6_queue_group *groups = NULL; size_t group_count = 0;
 	struct a6_queue_range *ranges = NULL; size_t range_count = 0;
+	struct pstree_item *pstree = NULL; size_t pstree_count = 0;
 	if (!path || !doc)
 		return SNAPSHOT_READER_FORMAT_ERROR;
 	memset(doc, 0, sizeof(*doc));
@@ -228,29 +359,80 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 	ranges = calloc(CRIU_SNAPSHOT_MAX_RECORDS, sizeof(*ranges));
 	if (!ranges)
 		goto io_error;
+	pstree = calloc(CRIU_SNAPSHOT_MAX_RECORDS, sizeof(*pstree));
+	if (!pstree)
+		goto io_error;
 	body_end=doc->size-CRIU_SNAPSHOT_FOOTER_SIZE; off=CRIU_SNAPSHOT_HEADER_SIZE;
 	while(off<body_end){
-		uint16_t type, flags; uint32_t reserved; uint64_t len;
+		uint16_t type, flags; uint32_t reserved; uint64_t len, raw_len;
 		const uint8_t *payload;
+		int scoped;
 		if(body_end-off<CRIU_SNAPSHOT_TLV_HEADER_SIZE) goto format_error;
 		type=le16(doc->data+off); flags=le16(doc->data+off+2);
-		reserved=le32(doc->data+off+4); len=le64(doc->data+off+8);
-		if(flags||reserved||len>CRIU_SNAPSHOT_MAX_RECORD_SIZE||len>body_end-off-CRIU_SNAPSHOT_TLV_HEADER_SIZE) goto format_error;
+		reserved=le32(doc->data+off+4); raw_len=le64(doc->data+off+8);
+		if (reserved || raw_len > CRIU_SNAPSHOT_MAX_RECORD_SIZE ||
+		    raw_len > body_end-off-CRIU_SNAPSHOT_TLV_HEADER_SIZE)
+			goto format_error;
 		off+=CRIU_SNAPSHOT_TLV_HEADER_SIZE; payload=doc->data+off;
+		scoped = !!(flags & CRIU_SNAPSHOT_TLV_F_PROCESS_SCOPE);
+		if (flags & ~CRIU_SNAPSHOT_TLV_F_PROCESS_SCOPE)
+			goto format_error;
+		if (scoped && !(header_flags & CRIU_SNAPSHOT_F_PSTREE))
+			goto format_error;
+		if (type == CRIU_SNAPSHOT_REC_END && flags)
+			goto format_error;
+		if (type == CRIU_SNAPSHOT_REC_PSTREE &&
+		    !(header_flags & CRIU_SNAPSHOT_F_PSTREE))
+			goto format_error;
+		if ((header_flags & CRIU_SNAPSHOT_F_PSTREE) &&
+		    process_scoped_type(type) != scoped)
+			goto format_error;
+		len = raw_len;
+		if (scoped) {
+			if (len < CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE ||
+			    !le32(payload) || le32(payload + 4))
+				goto format_error;
+			if (!validate_process_owner(type, le32(payload),
+						    payload + CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE,
+						    (size_t)(len - CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE)))
+				goto format_error;
+			payload += CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE;
+			len -= CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE;
+		}
 		if(++count>CRIU_SNAPSHOT_MAX_RECORDS) goto format_error;
 		if(type==CRIU_SNAPSHOT_REC_END){
 			if(len||off+len!=body_end||saw_end) goto format_error;
 			saw_end=1;
 		}else if(!known_type(type)){
 			if(type<0x8000) {
+				free(pstree);
 				free(ranges);
 				free(groups);
 				snapshot_document_free(doc);
 				return SNAPSHOT_READER_UNSUPPORTED;
 			}
-		}else if (type >= CRIU_SNAPSHOT_REC_SIGACTION &&
+		}else if (type != CRIU_SNAPSHOT_REC_PSTREE &&
+			  type >= CRIU_SNAPSHOT_REC_SIGACTION &&
 			  !(header_flags & CRIU_SNAPSHOT_F_SIGNAL_TIMERS)) {
 			goto format_error;
+		}else if(type == CRIU_SNAPSHOT_REC_PSTREE) {
+			int unsupported = 0;
+			if (!validate_pstree(payload, (size_t)len, &unsupported)) {
+				if (unsupported)
+					goto unsupported_error;
+				goto format_error;
+			}
+			if (pstree_count >= CRIU_SNAPSHOT_MAX_RECORDS ||
+			    pstree_index(pstree, pstree_count, le32(payload + 8)) >= 0)
+				goto format_error;
+			pstree[pstree_count].pid = le32(payload + 8);
+			pstree[pstree_count].ppid = le32(payload + 16);
+			pstree[pstree_count].pgid = le32(payload + 20);
+			pstree[pstree_count].sid = le32(payload + 24);
+			pstree[pstree_count].born_sid = (int32_t)le32(payload + 28);
+			pstree[pstree_count].flags = le32(payload + 4);
+			pstree_count++;
+			has_pstree = 1;
 		}else if(header_flags & CRIU_SNAPSHOT_F_SIGNAL_TIMERS){
 			switch (type) {
 			case CRIU_SNAPSHOT_REC_SIGACTION:
@@ -271,7 +453,7 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 			default: break;
 			}
 		}
-		off+=(size_t)len;
+		off += (size_t)raw_len;
 	}
 	if(!saw_end||off!=body_end||le64(doc->data+doc->size-24)!=CRIU_SNAPSHOT_MAGIC||
 	   le32(doc->data+doc->size-16)!=CRIU_SNAPSHOT_VERSION||
@@ -286,10 +468,15 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 			if (groups[i].covered != groups[i].total_count)
 				goto format_error;
 	}
-	free(ranges); free(groups); doc->record_count=count; return SNAPSHOT_READER_OK;
+	if ((header_flags & CRIU_SNAPSHOT_F_PSTREE) &&
+	    (!has_pstree || !validate_pstree_table(pstree, pstree_count)))
+		goto format_error;
+	free(pstree); free(ranges); free(groups); doc->record_count=count; return SNAPSHOT_READER_OK;
+unsupported_error:
+	free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_UNSUPPORTED;
 format_error:
-	free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_FORMAT_ERROR;
+	free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_FORMAT_ERROR;
 io_error:
-	free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_IO_ERROR;
+	free(pstree); free(ranges); free(groups); snapshot_document_free(doc); return SNAPSHOT_READER_IO_ERROR;
 }
 void snapshot_document_free(struct snapshot_document *doc){if(doc){free(doc->data);doc->data=NULL;doc->size=0;doc->record_count=0;}}
