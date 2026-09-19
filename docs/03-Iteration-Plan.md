@@ -4,12 +4,14 @@
 > `docs/steps/` 下的独立文件里。技术原理(学习资料)在 `docs/principles/` 下。
 > 开发环境与 CI 在 `docs/04-Dev-Environment.md`。
 
-**目标:** 用内核模块实现 CRIU 的 **dump 侧**,并用一个用户空间 mini-restore 学习
-restore 侧;每一步都能独立验证,不依赖后续步骤存在。
+**目标:** 用内核模块实现 CRIU 的 **dump 侧**,并用“用户空间解析 + 内核辅助提交 +
+用户空间最后一跳”的 mini-restore 学习 restore 侧;每一步都能独立验证,不依赖后续
+步骤存在。
 
 **架构:** 双轨并行。A 轨 = 内核模块 dump,验证器是**真 criu restore**。
-B 轨 = 用户空间 mini-restore,验证器是**真 criu dump 出来的镜像**。两轨接口是
-磁盘上的镜像文件,因此互不阻塞,任一轨单独完成都是完整成果。
+B 轨 = 用户空间解析真 CRIU 镜像、调用 Linux 5.10.29 内核辅助 restore，并由
+用户空间 bootstrap 触发 `rt_sigreturn`；验证器是**真 criu dump 出来的镜像**。
+两轨接口是磁盘上的镜像文件,因此互不阻塞,任一轨单独完成都是完整成果。
 
 **技术栈:** C(Linux Kernel Coding Style)、Linux 5.10.29 内核模块、protobuf-c、
 QEMU/virtme-ng、GitHub Actions、CRIU 的 `crit` 与 ZDTM 测试套件。
@@ -81,7 +83,8 @@ S0 已在 `Linux 5.10.29/aarch64`、`CONFIG_ARM64_PTR_AUTH` 未设置的实际 Q
   `vm_munmap()` 虽可链接，但只作用于 `current->mm`，不是目标 task 的替代品。
 - `vm_insert_page()` 不得用于普通匿名 VMA 的 restore；S0 证明它即使返回 0
   也会设置 `VM_MIXEDMAP` 并改变 VMA 语义。因此 restore 的地址空间切换、PID
-  安装和最后一跳全部归入 B1 用户态实现，A 轨只负责 dump。
+  安装和最后一跳不由 A 轨 dump 模块直接完成，而由 B1 的 carrier 通过内核辅助
+  restore 接口完成；protobuf 解析、staging 和 `rt_sigreturn` 仍在用户空间。
 
 这意味着计划的主要调整是实现边界，不是重排阶段：先完成 A1/A2，再以真实
 `criu restore` 通过作为 A3 门禁；B1/B2 可继续与 A 轨并行，且 B1 是唯一的
@@ -106,11 +109,11 @@ mini-restore 落点。S0 的完整实测记录和配置 hash 见
 A 轨合计工期暂不重新估算。A3 是核心门禁；当前先完成 A4-A8，再详细设计并实现
 A9，最后用 A10 做完整集成验证。B1/B2 只有 A10 通过后才启动。
 
-### B 轨 —— 用户空间 mini-restore(验证器:真 criu dump 的镜像)
+### B 轨 —— 用户空间解析 + 内核辅助 mini-restore(验证器:真 criu dump 的镜像)
 
 | 步骤 | 名称 | 工期 | 产出 | 文件 |
 |---|---|---|---|---|
-| **B1** | 单进程 restore(镜像读取 + 地址空间偷换 + `rt_sigreturn`) | 2-3 周 | 能恢复极简进程 | [B1](steps/B1-mini-restore.md) |
+| **B1** | 单进程 restore(用户空间解析/staging + 内核 VMA 提交 + `rt_sigreturn`) | 2-3 周 | 能恢复极简进程 | [B1 设计](superpowers/specs/2026-09-19-b1-kernel-assisted-restore-design.md)、[B1 步骤](steps/B1-mini-restore.md) |
 | **B2** | 进程树 restore(两趟 fork + session/pgid) | 2-3 周 | 能恢复多进程树 | [B2](steps/B2-pstree-restore.md) |
 
 B 轨暂缓，待 A10 通过后再启动。

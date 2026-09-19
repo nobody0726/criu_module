@@ -1,4 +1,11 @@
-# B1 —— 用户态迷你 restore(单进程)
+# B1 —— 单进程 restore（用户空间解析 + 内核辅助提交）
+
+> **架构更新（2026-09-19）：** 本文件早期版本描述的是“纯用户态
+> `premap → mremap → rt_sigreturn`”。该方案已被确认的内核辅助 restore 设计取代。
+> 当前设计合同以
+> [B1 内核辅助 restore 设计](../superpowers/specs/2026-09-19-b1-kernel-assisted-restore-design.md)
+> 为准；本文件中与“内核最终 VMA 提交”“`VALIDATE → COMMIT` 事务”不一致的旧段落
+> 仅保留作历史讨论，不能作为实施接口或验收标准。
 
 **工期:** 3-4 周 · **前置:** 无(与 A 轨并行) · **产出:** 能恢复真 criu 产出的极简进程镜像
 
