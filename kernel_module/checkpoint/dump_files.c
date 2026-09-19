@@ -16,7 +16,6 @@
 #include <net/af_unix.h>
 #include <net/sock.h>
 
-#include "../core/objmap.h"
 #include "dump_files.h"
 
 #define CRIU_SNAPSHOT_UNSUPPORTED (-EOPNOTSUPP)
@@ -471,31 +470,24 @@ static int map_one_fd(unsigned int fd, struct file *file,
 
 static int criu_dump_files_common(struct task_struct *task,
 			struct criu_snapshot_writer *writer,
-			unsigned int frozen_owners)
+			unsigned int frozen_owners,
+			struct criu_dump_shared_ctx *shared_ctx)
 {
 	struct criu_fs_record fs;
 	struct path cwd, root;
-	struct criu_objmap *objects;
 	struct dump_fd_ctx fd_ctx;
 	int ret = 0;
 
-	if (!task || !writer)
+	if (!task || !writer || !shared_ctx)
 		return -EINVAL;
-	objects = criu_objmap_new();
-	if (!objects)
-		return -ENOMEM;
 	fd_ctx.writer = writer;
-	fd_ctx.objects = objects;
-	fd_ctx.emitted = criu_objmap_new();
-	fd_ctx.pipes = criu_objmap_new();
-	if (!fd_ctx.emitted || !fd_ctx.pipes) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	fd_ctx.objects = shared_ctx->file_objects;
+	fd_ctx.emitted = shared_ctx->emitted_file_objects;
+	fd_ctx.pipes = shared_ctx->pipes;
 	ret = walk_fds_prepared(task, map_one_fd, dump_one_fd, &fd_ctx,
 				frozen_owners);
 	if (ret)
-		goto out;
+		return ret;
 
 	get_fs_pwd(task->fs, &cwd);
 	get_fs_root(task->fs, &root);
@@ -508,29 +500,34 @@ static int criu_dump_files_common(struct task_struct *task,
 	if (!ret)
 		ret = criu_snapshot_writer_record(writer, CRIU_SNAPSHOT_REC_FS,
 						  0, &fs, sizeof(fs));
-out:
-	criu_objmap_free(fd_ctx.pipes);
-	criu_objmap_free(fd_ctx.emitted);
-	criu_objmap_free(objects);
 	return ret;
 }
 
 int criu_dump_files(struct task_struct *task,
 			struct criu_snapshot_writer *writer)
 {
-	return criu_dump_files_common(task, writer, 0);
+	struct criu_dump_shared_ctx shared_ctx;
+	int ret;
+
+	ret = criu_dump_shared_ctx_init(&shared_ctx);
+	if (ret)
+		return ret;
+	ret = criu_dump_files_common(task, writer, 0, &shared_ctx);
+	criu_dump_shared_ctx_destroy(&shared_ctx);
+	return ret;
 }
 
 int criu_dump_files_process(struct criu_freeze_ctx *ctx,
 			    unsigned int process_index,
 			    const struct criu_freeze_process_view *view,
-			    struct criu_snapshot_writer *writer)
+			    struct criu_snapshot_writer *writer,
+			    struct criu_dump_shared_ctx *shared_ctx)
 {
 	unsigned int task_count;
 	unsigned int i;
 	int ret;
 
-	if (!ctx || !view || !writer)
+	if (!ctx || !view || !writer || !shared_ctx)
 		return -EINVAL;
 	ret = criu_freeze_process_task_count(ctx, process_index, &task_count);
 	if (ret)
@@ -549,5 +546,6 @@ int criu_dump_files_process(struct criu_freeze_ctx *ctx,
 		if (ret)
 			return ret;
 	}
-	return criu_dump_files_common(view->leader, writer, task_count);
+	return criu_dump_files_common(view->leader, writer, task_count,
+				      shared_ctx);
 }

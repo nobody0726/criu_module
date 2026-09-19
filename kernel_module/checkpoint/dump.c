@@ -13,6 +13,7 @@
 #include "dump_files.h"
 #include "dump_mm.h"
 #include "dump_pstree.h"
+#include "dump_shared.h"
 #include "dump_signals.h"
 #include "dump_task.h"
 #include "dump_threads.h"
@@ -245,11 +246,13 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 	struct criu_freeze_ctx *freeze_ctx = NULL;
 	struct criu_snapshot_header header;
 	struct criu_snapshot_writer writer;
+	struct criu_dump_shared_ctx shared_ctx;
 	struct criu_freeze_process_view root_view;
 	u64 generation, frozen_generation;
 	unsigned int process_count;
 	int ret, thaw_ret;
 	bool opened = false;
+	bool shared_ctx_ready = false;
 
 	if (vpid <= 0 || !path || !*path)
 		return -EINVAL;
@@ -290,6 +293,10 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 	ret = dump_tree_validate_process_isolation(freeze_ctx, process_count);
 	if (ret)
 		goto thaw;
+	ret = criu_dump_shared_ctx_init(&shared_ctx);
+	if (ret)
+		goto thaw;
+	shared_ctx_ready = true;
 	ret = criu_snapshot_writer_open(&writer, path, &header);
 	if (ret)
 		goto thaw;
@@ -312,8 +319,7 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 			if (!ret)
 				ret = criu_dump_mm_process(&view, &writer);
 			if (!ret)
-				ret = criu_dump_files_process(freeze_ctx, i,
-							      &view, &writer);
+				ret = criu_dump_files_process(freeze_ctx, i, &view, &writer, &shared_ctx);
 			if (!ret) {
 				struct criu_signal_capture *signal_capture;
 				struct criu_timer_capture *timer_capture;
@@ -356,6 +362,8 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 	if (ret && opened)
 		criu_snapshot_writer_abort(&writer);
 thaw:
+	if (shared_ctx_ready)
+		criu_dump_shared_ctx_destroy(&shared_ctx);
 	thaw_ret = criu_thaw(freeze_ctx);
 	if (!ret && thaw_ret)
 		ret = thaw_ret;
