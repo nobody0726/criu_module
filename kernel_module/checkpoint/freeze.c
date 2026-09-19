@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 
 #include "criu_kernel.h"
+#include "collect_tree.h"
 
 enum criu_freeze_state {
 	CRIU_FREEZE_IDLE,
@@ -28,6 +29,7 @@ struct criu_freeze_ctx {
 	struct criu_freeze_task *tasks;
 	unsigned int task_count;
 	struct criu_freezer_cookie *cgroup_cookie;
+	struct criu_tree_closure *tree;
 	char original_cgroup[CRIU_PATH_MAX];
 	char temporary_cgroup[CRIU_PATH_MAX];
 };
@@ -72,6 +74,41 @@ static void criu_freeze_release_tasks(struct criu_freeze_ctx *ctx)
 	ctx->task_count = 0;
 }
 
+static void criu_freeze_release_tree(struct criu_freeze_ctx *ctx)
+{
+	if (!ctx || !ctx->tree)
+		return;
+	criu_tree_closure_free(ctx->tree);
+	ctx->tree = NULL;
+}
+
+static int criu_freeze_flatten_tree_tasks(struct criu_freeze_ctx *ctx)
+{
+	unsigned int i, j, total = 0, index = 0;
+
+	for (i = 0; i < ctx->tree->process_count; i++) {
+		if (total > UINT_MAX - ctx->tree->processes[i].task_count)
+			return -E2BIG;
+		total += ctx->tree->processes[i].task_count;
+	}
+	ctx->tasks = kcalloc(total, sizeof(*ctx->tasks), GFP_KERNEL);
+	if (!ctx->tasks)
+		return -ENOMEM;
+	for (i = 0; i < ctx->tree->process_count; i++)
+		for (j = 0; j < ctx->tree->processes[i].task_count; j++) {
+			ctx->tasks[index].task =
+				ctx->tree->processes[i].tasks[j].task;
+			ctx->tasks[index].tid =
+				ctx->tree->processes[i].tasks[j].tid;
+			ctx->tasks[index].stopped =
+				ctx->tree->processes[i].tasks[j].stopped;
+			get_task_struct(ctx->tasks[index].task);
+			index++;
+		}
+	ctx->task_count = total;
+	return 0;
+}
+
 static int criu_freeze_rollback_locked(struct criu_freeze_ctx *ctx)
 {
 	int ret;
@@ -85,6 +122,7 @@ static int criu_freeze_rollback_locked(struct criu_freeze_ctx *ctx)
 		return ret;
 	}
 	criu_freeze_release_tasks(ctx);
+	criu_freeze_release_tree(ctx);
 	if (ctx->target)
 		put_task_struct(ctx->target);
 	criu_freeze_current = NULL;
@@ -192,9 +230,6 @@ int criu_freeze(pid_t vpid, bool include_children,
 		return -EINVAL;
 	if (ctx)
 		*ctx = NULL;
-	if (include_children)
-		return -EOPNOTSUPP;
-
 	mutex_lock(&criu_freeze_lock);
 	criu_freeze_last_error = 0;
 	if (criu_freeze_current) {
@@ -241,7 +276,10 @@ int criu_freeze(pid_t vpid, bool include_children,
 	new_ctx->target = target;
 	new_ctx->target_generation = generation;
 	new_ctx->include_children = include_children;
-	ret = criu_freeze_capture_tasks(new_ctx);
+	if (include_children)
+		ret = criu_collect_tree(target, &new_ctx->tree);
+	else
+		ret = criu_freeze_capture_tasks(new_ctx);
 	if (ret) {
 		put_task_struct(target);
 		criu_freeze_current = NULL;
@@ -252,17 +290,37 @@ int criu_freeze(pid_t vpid, bool include_children,
 		mutex_unlock(&criu_freeze_lock);
 		return ret;
 	}
-	ret = criu_cgroup_freeze_threadgroup(target->group_leader,
-					     &new_ctx->cgroup_cookie,
-					     new_ctx->original_cgroup,
-					     sizeof(new_ctx->original_cgroup),
-					     new_ctx->temporary_cgroup,
-					     sizeof(new_ctx->temporary_cgroup));
+	if (include_children) {
+		struct task_struct **leaders = NULL;
+
+		ret = criu_tree_process_leaders(new_ctx->tree, &leaders);
+		if (!ret)
+			ret = criu_cgroup_freeze_process_set(
+				leaders, new_ctx->tree->process_count,
+				&new_ctx->cgroup_cookie,
+				new_ctx->original_cgroup,
+				sizeof(new_ctx->original_cgroup),
+				new_ctx->temporary_cgroup,
+				sizeof(new_ctx->temporary_cgroup));
+		kfree(leaders);
+		if (!ret)
+			ret = criu_freeze_flatten_tree_tasks(new_ctx);
+	} else {
+		ret = criu_cgroup_freeze_threadgroup(target->group_leader,
+						     &new_ctx->cgroup_cookie,
+						     new_ctx->original_cgroup,
+						     sizeof(new_ctx->original_cgroup),
+						     new_ctx->temporary_cgroup,
+						     sizeof(new_ctx->temporary_cgroup));
+	}
 	pr_info("criu_freeze: cgroup freeze pid=%d ret=%d cookie=%p original=%s temporary=%s\n",
 		vpid, ret, new_ctx->cgroup_cookie, new_ctx->original_cgroup,
 		new_ctx->temporary_cgroup);
 	if (ret) {
 		criu_freeze_release_tasks(new_ctx);
+		if (new_ctx->cgroup_cookie)
+			criu_cgroup_thaw_threadgroup(new_ctx->cgroup_cookie);
+		criu_freeze_release_tree(new_ctx);
 		put_task_struct(target);
 		criu_freeze_current = NULL;
 		WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_ROLLBACK);
@@ -346,11 +404,108 @@ int criu_thaw(struct criu_freeze_ctx *ctx)
 		return ret;
 	}
 	criu_freeze_release_tasks(ctx);
+	criu_freeze_release_tree(ctx);
 	if (ctx->target)
 		put_task_struct(ctx->target);
 	criu_freeze_current = NULL;
 	WRITE_ONCE(criu_freeze_current_state, CRIU_FREEZE_IDLE);
 	kfree(ctx);
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
+}
+
+int criu_freeze_process_count(struct criu_freeze_ctx *ctx,
+			      unsigned int *count)
+{
+	if (!ctx || !count)
+		return -EINVAL;
+	mutex_lock(&criu_freeze_lock);
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FROZEN_SETTLED || !ctx->tree) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	*count = ctx->tree->process_count;
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
+}
+
+int criu_freeze_process_get(struct criu_freeze_ctx *ctx,
+			    unsigned int process_index,
+			    struct criu_freeze_process_view *view)
+{
+	struct criu_tree_process *process;
+
+	if (!ctx || !view)
+		return -EINVAL;
+	mutex_lock(&criu_freeze_lock);
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FROZEN_SETTLED || !ctx->tree ||
+	    process_index >= ctx->tree->process_count) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	process = &ctx->tree->processes[process_index];
+	memset(view, 0, sizeof(*view));
+	view->leader = process->leader;
+	view->parent = process->parent;
+	view->pid = process->pid;
+	view->tgid = process->tgid;
+	view->ppid = process->ppid;
+	view->pgid = process->pgid;
+	view->sid = process->sid;
+	view->born_sid = process->born_sid;
+	view->root = process->root;
+	view->external_parent = process->external_parent;
+	view->session_leader = process->session_leader;
+	view->process_group_leader = process->process_group_leader;
+	view->task_count = process->task_count;
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
+}
+
+int criu_freeze_process_task_count(struct criu_freeze_ctx *ctx,
+				   unsigned int process_index,
+				   unsigned int *count)
+{
+	if (!ctx || !count)
+		return -EINVAL;
+	mutex_lock(&criu_freeze_lock);
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FROZEN_SETTLED || !ctx->tree ||
+	    process_index >= ctx->tree->process_count) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	*count = ctx->tree->processes[process_index].task_count;
+	mutex_unlock(&criu_freeze_lock);
+	return 0;
+}
+
+int criu_freeze_process_task_get(struct criu_freeze_ctx *ctx,
+				 unsigned int process_index,
+				 unsigned int task_index,
+				 struct criu_freeze_task_view *view)
+{
+	struct criu_tree_process *process;
+
+	if (!ctx || !view)
+		return -EINVAL;
+	mutex_lock(&criu_freeze_lock);
+	if (ctx != criu_freeze_current ||
+	    ctx->state != CRIU_FREEZE_FROZEN_SETTLED || !ctx->tree ||
+	    process_index >= ctx->tree->process_count) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	process = &ctx->tree->processes[process_index];
+	if (task_index >= process->task_count) {
+		mutex_unlock(&criu_freeze_lock);
+		return -ENOENT;
+	}
+	view->task = process->tasks[task_index].task;
+	view->tid = process->tasks[task_index].tid;
+	view->stopped = process->tasks[task_index].stopped;
 	mutex_unlock(&criu_freeze_lock);
 	return 0;
 }

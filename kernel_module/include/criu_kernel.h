@@ -77,6 +77,22 @@ struct criu_freeze_ctx;
 struct criu_objmap;
 struct file;
 
+struct criu_freeze_process_view {
+	struct task_struct *leader;
+	struct task_struct *parent;
+	pid_t pid;
+	pid_t tgid;
+	pid_t ppid;
+	pid_t pgid;
+	pid_t sid;
+	pid_t born_sid;
+	bool root;
+	bool external_parent;
+	bool session_leader;
+	bool process_group_leader;
+	unsigned int task_count;
+};
+
 /* Borrowed view into the A2-pinned task set. The task reference remains owned
  * by the freeze context; callers must not retain this view past criu_thaw(). */
 struct criu_freeze_task_view {
@@ -118,6 +134,18 @@ int criu_freeze_task_count(struct criu_freeze_ctx *ctx,
 int criu_freeze_task_get(struct criu_freeze_ctx *ctx, unsigned int index,
 			 struct criu_freeze_task_view *view);
 int criu_freeze_generation(struct criu_freeze_ctx *ctx, u64 *generation);
+int criu_freeze_process_count(struct criu_freeze_ctx *ctx,
+			      unsigned int *count);
+int criu_freeze_process_get(struct criu_freeze_ctx *ctx,
+			    unsigned int process_index,
+			    struct criu_freeze_process_view *view);
+int criu_freeze_process_task_count(struct criu_freeze_ctx *ctx,
+				   unsigned int process_index,
+				   unsigned int *count);
+int criu_freeze_process_task_get(struct criu_freeze_ctx *ctx,
+				 unsigned int process_index,
+				 unsigned int task_index,
+				 struct criu_freeze_task_view *view);
 int criu_freeze_status(struct criu_freeze_status *out);
 int criu_collect_mm_info(struct task_struct *task, struct criu_mm_info *out);
 int criu_walk_vmas(struct task_struct *task, criu_vma_info_fn fn, void *arg);
