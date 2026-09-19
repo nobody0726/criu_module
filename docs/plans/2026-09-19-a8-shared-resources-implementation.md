@@ -231,6 +231,10 @@ fdinfo-$files_id.img  == one image per unique files_id
 1. Add anonymous shared-memory parent/child fixture with bidirectional sequence and fixed pattern checks.
 2. Add POSIX shm or memfd/tmpfs fixture compatible with the Linux 5.10.29 guest.
 3. Add image-size assertion that shared payload is approximately one copy, not one copy per process.
+   The first guest gate validates anonymous `MAP_SHARED|MAP_ANONYMOUS`; the
+   POSIX `shm_open` fixture is compiled for the later file-backed/tmpfs
+   semantic branch because ordinary file-backed `MAP_SHARED` content remains
+   outside A8's dumped page stream.
 4. Run:
 
    ```sh

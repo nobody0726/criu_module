@@ -18,14 +18,19 @@
 - [x] A8.1 共享 fd table/file object
 - [x] A8.1 跨进程 pipe/UNIX stream socket
 - [x] A8.1 Linux 5.10.29 guest cross-restore gate
-- [ ] A8.2 shared-memory snapshot records/converter model
-- [ ] A8.2 shared-memory guest gate
+- [x] A8.2 shared-memory snapshot records/converter model
+- [x] A8.2 anonymous shared-memory guest gate
 - [ ] SysV shm feasibility branch
 - [ ] A8 regression/review/release
 
 A8.1 的 guest gate 已使用 Lima 本地 `/tmp` staging，并验证 PID 存活、
-跨进程 pipe/UNIX socket 行为以及 guest `dmesg` 无内核错误。下一步从
-A8.2 的 shared-memory contract（先 RED，再实现）开始。
+跨进程 pipe/UNIX socket 行为以及 guest `dmesg` 无内核错误。
+
+A8.2 当前核心 gate 覆盖匿名 `MAP_SHARED|MAP_ANONYMOUS`：dump 侧按 shmem inode
+分配 `shmid`，VMA 追加 `shmid` 引用，converter 输出 `pagemap-shmem-$shmid.img`
+和独立 `pages-$pages_id.img`，真实 CRIU restore 后父子进程仍双向可见。POSIX
+`shm_open` fixture 已加入编译目标，但普通 file-backed `MAP_SHARED` 内容仍不进入
+pages；该语义缺口继续按 A8 设计记录，不作为匿名 shmem 核心 gate 的阻塞项。
 
 ---
 

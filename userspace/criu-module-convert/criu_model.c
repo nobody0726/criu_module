@@ -82,6 +82,7 @@
 #define VMA_AREA_VDSO (1U << 3)
 #define VMA_AREA_HEAP (1U << 5)
 #define VMA_FILE_PRIVATE (1U << 6)
+#define VMA_ANON_SHARED (1U << 8)
 #define VMA_ANON_PRIVATE (1U << 9)
 #define VMA_AREA_VVAR (1U << 12)
 #define VMA_AREA_NOT_ACCOUNTABLE (1U << 18)
@@ -1876,6 +1877,8 @@ static uint32_t vma_status(const uint8_t *vma)
 
 	if (class == VMA_CLASS_ANON_PRIVATE)
 		status |= VMA_ANON_PRIVATE;
+	else if (class == VMA_CLASS_ANON_SHARED)
+		status |= VMA_ANON_SHARED;
 	else if (class == VMA_CLASS_FILE_PRIVATE)
 		status |= VMA_FILE_PRIVATE | VMA_AREA_NOT_ACCOUNTABLE;
 	if (special == VMA_SPECIAL_VDSO)
@@ -2647,38 +2650,42 @@ static int emit_shmem_images(const struct snapshot_model *model,
 {
 	size_t i, j;
 	struct image_writer *messages = NULL;
-	struct image_writer_raw_record *records = NULL;
+	uint8_t *raw = NULL;
 	size_t run_count = 0;
 
 	for (i = 0; i < model->shmem_objects.count; i++) {
 		const uint8_t *object = model->shmem_objects.items[i].data;
 		uint32_t shmid = u32(object + 4);
+		uint32_t pages_id;
 		uint64_t size = u64(object + 8);
+		size_t raw_len = 0;
+		size_t raw_capacity = 0;
 		char name[64];
 		size_t index = 1;
 		int ret;
 
+		if (shmid > UINT32_MAX - 100000U)
+			return -1;
+		pages_id = 100000U + shmid;
 		run_count = 0;
 		for (j = 0; j < model->shmem_page_runs.count; j++)
 			if (u32(model->shmem_page_runs.items[j].data + 4) == shmid)
 				run_count++;
 		messages = calloc(run_count + 1U, sizeof(*messages));
-		records = calloc(run_count + 1U, sizeof(*records));
-		if (!messages || !records) {
+		if (!messages) {
 			free(messages);
-			free(records);
 			return -1;
 		}
 		for (j = 0; j < run_count + 1U; j++)
 			image_writer_init(&messages[j]);
-		if (image_writer_field_varint(&messages[0], 1, shmid))
+		if (image_writer_field_varint(&messages[0], 1, pages_id))
 			goto error;
-		records[0].message = &messages[0];
 		for (j = 0; j < model->shmem_page_runs.count; j++) {
 			const uint8_t *run = model->shmem_page_runs.items[j].data;
 			uint64_t page_index;
 			uint32_t nr_pages;
 			uint32_t data_len;
+			uint8_t *new_raw;
 
 			if (u32(run + 4) != shmid)
 				continue;
@@ -2687,8 +2694,26 @@ static int emit_shmem_images(const struct snapshot_model *model,
 			data_len = u32(run + 20);
 			if (page_index > UINT64_MAX / model->page_size ||
 			    page_index + nr_pages > (size + model->page_size - 1U) /
-			    model->page_size)
+			    model->page_size ||
+			    raw_len > SIZE_MAX - data_len)
 				goto error;
+			if (raw_len + data_len > raw_capacity) {
+				raw_capacity = raw_capacity ? raw_capacity * 2U : 4096U;
+				while (raw_capacity < raw_len + data_len) {
+					if (raw_capacity > SIZE_MAX / 2U) {
+						raw_capacity = raw_len + data_len;
+						break;
+					}
+					raw_capacity *= 2U;
+				}
+				new_raw = realloc(raw, raw_capacity);
+				if (!new_raw)
+					goto error;
+				raw = new_raw;
+			}
+			memcpy(raw + raw_len, run + SHMEM_PAGE_RUN_HEADER_SIZE,
+			       data_len);
+			raw_len += data_len;
 			if (image_writer_field_varint(&messages[index], 1,
 						      page_index * model->page_size) ||
 			    image_writer_field_varint(&messages[index], 2, nr_pages) ||
@@ -2696,18 +2721,21 @@ static int emit_shmem_images(const struct snapshot_model *model,
 						      PE_PRESENT) ||
 			    image_writer_field_varint(&messages[index], 5, nr_pages))
 				goto error;
-			records[index].message = &messages[index];
-			records[index].raw = run + SHMEM_PAGE_RUN_HEADER_SIZE;
-			records[index].raw_len = data_len;
 			index++;
 		}
 		if (index != run_count + 1U)
 			goto error;
 		snprintf(name, sizeof(name), "pagemap-shmem-%u.img", shmid);
-		ret = emit_messages_with_raw(directory, name, PAGEMAP_MAGIC,
-					     records, index);
+		ret = emit_messages(directory, name, PAGEMAP_MAGIC,
+				    messages, index, false);
 		free_messages(messages, index);
-		free(records);
+		messages = NULL;
+		if (ret)
+			return -1;
+		snprintf(name, sizeof(name), "pages-%u.img", pages_id);
+		ret = emit_raw(directory, name, raw, raw_len);
+		free(raw);
+		raw = NULL;
 		if (ret)
 			return -1;
 	}
@@ -2715,7 +2743,7 @@ static int emit_shmem_images(const struct snapshot_model *model,
 
 error:
 	free_messages(messages, run_count + 1U);
-	free(records);
+	free(raw);
 	return -1;
 }
 

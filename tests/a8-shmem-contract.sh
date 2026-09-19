@@ -15,6 +15,7 @@ python3 "$root_dir/tests/fixtures/a7-snapshot-builder.py" "$tmp"
 test -s "$tmp/images/mm-400.img"
 test -s "$tmp/images/mm-401.img"
 test -s "$tmp/images/pagemap-shmem-77.img"
+test -s "$tmp/images/pages-100077.img"
 test ! -e "$tmp/images/pagemap-shmem-78.img"
 
 python3 - "$tmp/images" <<'PY'
@@ -84,10 +85,11 @@ for pid, address in ((400, 0x500000), (401, 0x700000)):
     vma = vmas[0]
     assert vma[1] == address, (pid, vma)
     assert vma[4] == 77, (pid, vma)
+    assert vma[7] & (1 << 8), (pid, vma)
 
-shmem = (root / "pagemap-shmem-77.img").read_bytes()
+shmem = (root / "pages-100077.img").read_bytes()
 assert shmem.count(bytes([0xA8]) * 8192) == 1
-assert len(shmem) < 8 + 4 * 64 + 8192
+assert len(shmem) == 8192
 PY
 
 echo 'A8_SHMEM_CONTRACT: PASS'
