@@ -119,6 +119,20 @@ def full_process_records(pid, ppid):
     ]
 
 
+def shared_files_process_records(pid, ppid, object_id=9001):
+    """A process record set whose fd carries an explicit shared file object."""
+    records = full_process_records(pid, ppid)
+    out = []
+    for kind, payload, flags in records:
+        if kind != FD:
+            out.append((kind, payload, flags))
+            continue
+        # The legacy 560-byte fd record is followed by A5's object metadata.
+        payload += struct.pack("<QII", object_id, 1, 0)
+        out.append((kind, payload, flags))
+    return out
+
+
 def build(records, flags=PSTREE_FLAG):
     body = b"".join(tlv(*record) for record in records) + tlv(END, b"")
     total = HEADER + len(body) + FOOTER
@@ -218,6 +232,24 @@ def main(out_dir):
             scoped(401, TASK_IDS, task_ids(401, 99, 401)),
         ]
     ))
+    shared = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 77)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 77)),
+    ]
+    shared += shared_files_process_records(400, 0)
+    shared += shared_files_process_records(401, 400)
+    (out / "a8-shared-files.bin").write_bytes(
+        build(shared, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
+    distinct = a8_tree() + [
+        scoped(400, TASK_IDS, task_ids(400, 400, 77)),
+        scoped(401, TASK_IDS, task_ids(401, 401, 78)),
+    ]
+    distinct += shared_files_process_records(400, 0, object_id=9100)
+    distinct += shared_files_process_records(401, 400, object_id=9100)
+    (out / "a8-shared-file-object.bin").write_bytes(
+        build(distinct, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
 
 
 if __name__ == "__main__":

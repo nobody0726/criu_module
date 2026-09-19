@@ -90,8 +90,7 @@ static int dump_tree_validate_process_isolation(struct criu_freeze_ctx *ctx,
 			task_lock(right.leader);
 			right_files = right.leader->files;
 			task_unlock(right.leader);
-			if (!right_files || right_mm == left_mm ||
-			    right_files == left_files) {
+			if (!right_files || right_mm == left_mm) {
 				mmput(right_mm);
 				mmput(left_mm);
 				return -EOPNOTSUPP;

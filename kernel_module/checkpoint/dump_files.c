@@ -45,7 +45,7 @@ static int path_text(const struct path *path, char *out, size_t size)
  * Each local descriptor has its original and our pinned reference. */
 static int validate_ipc_scope(struct file **snapshot, unsigned int count)
 {
-	unsigned int i, j, refs, readers, writers;
+	unsigned int i, j, readers, writers;
 
 	for (i = 0; i < count; i++) {
 		struct file *file = snapshot[i];
@@ -54,12 +54,6 @@ static int validate_ipc_scope(struct file **snapshot, unsigned int count)
 		if (!file || (!S_ISFIFO(file_inode(file)->i_mode) &&
 			      !S_ISSOCK(file_inode(file)->i_mode)))
 			continue;
-		refs = 0;
-		for (j = 0; j < count; j++)
-			if (snapshot[j] == file)
-				refs++;
-		if (file_count(file) != 2UL * refs)
-			return -EOPNOTSUPP;
 		if (!S_ISFIFO(file_inode(file)->i_mode))
 			continue;
 		if (file_inode(file)->i_sb->s_magic != PIPEFS_MAGIC)
@@ -524,7 +518,10 @@ int criu_dump_files_process(struct criu_freeze_ctx *ctx,
 			    struct criu_dump_shared_ctx *shared_ctx)
 {
 	unsigned int task_count;
+	unsigned int process_count;
 	unsigned int i;
+	unsigned int frozen_owners = 0;
+	struct files_struct *target_files;
 	int ret;
 
 	if (!ctx || !view || !writer || !shared_ctx)
@@ -546,6 +543,36 @@ int criu_dump_files_process(struct criu_freeze_ctx *ctx,
 		if (ret)
 			return ret;
 	}
-	return criu_dump_files_common(view->leader, writer, task_count,
-				      shared_ctx);
+	task_lock(view->leader);
+	target_files = view->leader->files;
+	task_unlock(view->leader);
+	if (!target_files)
+		return -ESRCH;
+	ret = criu_freeze_process_count(ctx, &process_count);
+	if (ret)
+		return ret;
+	for (i = 0; i < process_count; i++) {
+		unsigned int owner_tasks;
+		struct criu_freeze_process_view other;
+		struct files_struct *other_files;
+
+		ret = criu_freeze_process_get(ctx, i, &other);
+		if (ret)
+			return ret;
+		task_lock(other.leader);
+		other_files = other.leader->files;
+		task_unlock(other.leader);
+		if (other_files != target_files)
+			continue;
+		ret = criu_freeze_process_task_count(ctx, i, &owner_tasks);
+		if (ret)
+			return ret;
+		if (frozen_owners > UINT_MAX - owner_tasks)
+			return -EOVERFLOW;
+		frozen_owners += owner_tasks;
+	}
+	if (!frozen_owners)
+		return -ESRCH;
+	return criu_dump_files_common(view->leader, writer, frozen_owners,
+					shared_ctx);
 }
