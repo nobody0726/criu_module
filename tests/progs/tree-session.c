@@ -1,6 +1,18 @@
 #define _GNU_SOURCE
+#include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
+
+static void marker(int signo)
+{
+	static const char msg[] = "MARKER\n";
+	ssize_t written;
+
+	(void)signo;
+	written = write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+	(void)written;
+}
 
 static void stay(void)
 {
@@ -11,6 +23,11 @@ static void stay(void)
 int main(void)
 {
 	pid_t child = fork();
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = marker;
+	sigaction(SIGUSR1, &sa, NULL);
 	if (child < 0)
 		return 1;
 	if (child == 0) {
