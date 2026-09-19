@@ -9,9 +9,21 @@ VERSION = 1
 HEADER = 64
 FOOTER = 24
 PSTREE_FLAG = 1 << 1
+SIGNAL_TIMERS_FLAG = 1
 SCOPE_FLAG = 1
 PSTREE = 19
 TASK = 1
+MM = 2
+VMA = 3
+REGS = 4
+FD = 5
+FS = 6
+CREDS = 7
+THREAD = 10
+SIGACTION = 15
+SIGNAL_QUEUE = 16
+ITIMERS = 17
+POSIX_TIMERS = 18
 END = 0xFFFF
 
 ROOT = 1
@@ -38,6 +50,59 @@ def pstree(pid, ppid, pgid, sid, flags, born_sid=-1, namespace=1):
 
 def task(pid):
     return struct.pack("<3I", pid, pid, 0)
+
+
+def fixed_path(path, size=512):
+    raw = path.encode()
+    assert len(raw) < size
+    return raw + b"\0" * (size - len(raw))
+
+
+def scoped(owner, kind, payload):
+    return (kind, struct.pack("<II", owner, 0) + payload, SCOPE_FLAG)
+
+
+def full_process_records(pid, ppid):
+    task_rec = struct.pack("<7I2QI", pid, pid, ppid, 1000, 1000, 1000, 1000,
+                           0x40000000, 0, 16)
+    task_rec += b"\0" * 24
+    task_rec += b"".join(struct.pack("<2Q", 0xffffffffffffffff,
+                                     0xffffffffffffffff) for _ in range(16))
+    task_rec += fixed_path(f"a7-{pid}", 16)
+    regs = bytes(336)
+    mm = struct.pack("<2I12Q2I", pid, pid, *([0] * 12), 1, 0)
+    vma = struct.pack("<3Q5I6Q512s", 0x400000, 0x401000, 0, 5, 0, 0, 2, 0,
+                      0, 0, 1, 0, 0, 0, fixed_path("[heap]"))
+    fd = struct.pack("<2I5Q512s", 0, 0o20666, 0, 0, 1, 20, 0,
+                     fixed_path("/dev/null"))
+    fs = fixed_path("/tmp") + fixed_path("/")
+    creds = struct.pack("<9I", *([1000] * 8 + [0])) + struct.pack("<10I", *([0] * 10))
+    thread = struct.pack("<4IQ8s512s", pid, pid, 8, 0, 0, bytes(8), bytes(512))
+    sigactions = struct.pack("<IIII", 1, 64, 48, 0) + b"".join(
+        struct.pack("<IIQQQQQ", signo, 0, 0, 0, 0, 0, 0)
+        for signo in range(1, 65)
+    )
+    queue_header = struct.pack("<IIIIIIIIQQ", 1, 1, 0, 0, 0, 0, 136, 128, 0, 0)
+    private_queue = struct.pack("<IIIIIIIIQQ", 1, 2, pid, 0, 0, 0, 136, 128, 0, 0)
+    itimers = struct.pack("<IIII", 1, 3, 24, 0) + b"".join(
+        struct.pack("<IIQQ", kind, 0, 0, 0) for kind in (1, 2, 3)
+    )
+    posix = struct.pack("<IIII", 1, 0, 56, 0)
+    return [
+        scoped(pid, TASK, task_rec),
+        scoped(pid, REGS, struct.pack("<I", len(regs)) + regs + struct.pack("<Q", 0)),
+        scoped(pid, MM, mm),
+        scoped(pid, VMA, vma),
+        scoped(pid, FD, fd),
+        scoped(pid, FS, fs),
+        scoped(pid, CREDS, creds),
+        scoped(pid, THREAD, thread),
+        scoped(pid, SIGACTION, sigactions),
+        scoped(pid, SIGNAL_QUEUE, queue_header),
+        scoped(pid, SIGNAL_QUEUE, private_queue),
+        scoped(pid, ITIMERS, itimers),
+        scoped(pid, POSIX_TIMERS, posix),
+    ]
 
 
 def build(records, flags=PSTREE_FLAG):
@@ -104,6 +169,10 @@ def main(out_dir):
         (PSTREE, pstree(150, 0, 150, 150, ROOT | SESSION_LEADER | PGRP_LEADER)),
         (TASK, scoped, SCOPE_FLAG),
     ]))
+    full = tree_simple() + full_process_records(100, 0) + full_process_records(101, 100)
+    (out / "a7-full-multi.bin").write_bytes(
+        build(full, flags=PSTREE_FLAG | SIGNAL_TIMERS_FLAG)
+    )
 
 
 if __name__ == "__main__":

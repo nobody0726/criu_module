@@ -173,6 +173,7 @@ static int validate_pstree_table(const struct pstree_item *items, size_t count)
 }
 
 struct a6_queue_group {
+	uint32_t process_owner;
 	uint32_t scope;
 	uint32_t owner_tid;
 	uint32_t total_count;
@@ -182,6 +183,7 @@ struct a6_queue_group {
 };
 
 struct a6_queue_range {
+	uint32_t process_owner;
 	uint32_t scope;
 	uint32_t owner_tid;
 	uint32_t first;
@@ -256,7 +258,7 @@ static int validate_posix_timers(const uint8_t *p, size_t len)
 	return 1;
 }
 
-static int validate_queue(const uint8_t *p, size_t len,
+static int validate_queue(uint32_t process_owner, const uint8_t *p, size_t len,
 			  struct a6_queue_group *groups, size_t *group_count,
 			  struct a6_queue_range *ranges, size_t *range_count)
 {
@@ -286,7 +288,8 @@ static int validate_queue(const uint8_t *p, size_t len,
 		    (size_t)count * CRIU_SNAPSHOT_SIGNAL_QUEUE_ENTRY_SIZE)
 		return 0;
 	for (i = 0; i < *group_count; i++)
-		if (groups[i].scope == scope && groups[i].owner_tid == owner) {
+		if (groups[i].process_owner == process_owner &&
+		    groups[i].scope == scope && groups[i].owner_tid == owner) {
 			group = i + 1;
 			break;
 		}
@@ -294,6 +297,7 @@ static int validate_queue(const uint8_t *p, size_t len,
 		if (*group_count >= CRIU_SNAPSHOT_MAX_RECORDS)
 			return 0;
 		group = ++*group_count;
+		groups[group - 1].process_owner = process_owner;
 		groups[group - 1].scope = scope;
 		groups[group - 1].owner_tid = owner;
 		groups[group - 1].total_count = total;
@@ -304,12 +308,14 @@ static int validate_queue(const uint8_t *p, size_t len,
 		return 0;
 	}
 	for (i = 0; i < *range_count; i++)
-		if (ranges[i].scope == scope && ranges[i].owner_tid == owner &&
+		if (ranges[i].process_owner == process_owner &&
+		    ranges[i].scope == scope && ranges[i].owner_tid == owner &&
 		    first < ranges[i].first + ranges[i].count &&
 		    ranges[i].first < first + count)
 			return 0;
 	if (*range_count >= CRIU_SNAPSHOT_MAX_RECORDS)
 		return 0;
+	ranges[*range_count].process_owner = process_owner;
 	ranges[*range_count].scope = scope;
 	ranges[*range_count].owner_tid = owner;
 	ranges[*range_count].first = first;
@@ -366,6 +372,7 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 	while(off<body_end){
 		uint16_t type, flags; uint32_t reserved; uint64_t len, raw_len;
 		const uint8_t *payload;
+		uint32_t process_owner = 0;
 		int scoped;
 		if(body_end-off<CRIU_SNAPSHOT_TLV_HEADER_SIZE) goto format_error;
 		type=le16(doc->data+off); flags=le16(doc->data+off+2);
@@ -392,7 +399,8 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 			if (len < CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE ||
 			    !le32(payload) || le32(payload + 4))
 				goto format_error;
-			if (!validate_process_owner(type, le32(payload),
+			process_owner = le32(payload);
+			if (!validate_process_owner(type, process_owner,
 						    payload + CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE,
 						    (size_t)(len - CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE)))
 				goto format_error;
@@ -436,19 +444,22 @@ int snapshot_read_validate(const char *path, struct snapshot_document *doc)
 		}else if(header_flags & CRIU_SNAPSHOT_F_SIGNAL_TIMERS){
 			switch (type) {
 			case CRIU_SNAPSHOT_REC_SIGACTION:
-				if (has_sigactions || !validate_sigactions(payload, (size_t)len)) goto format_error;
+				if ((!scoped && has_sigactions) ||
+				    !validate_sigactions(payload, (size_t)len)) goto format_error;
 				has_sigactions = 1; break;
 			case CRIU_SNAPSHOT_REC_SIGNAL_QUEUE:
-				if (!validate_queue(payload, (size_t)len, groups, &group_count,
+				if (!validate_queue(process_owner, payload, (size_t)len, groups, &group_count,
 						    ranges, &range_count)) goto format_error;
 				if (le32(payload + 4) == CRIU_SNAPSHOT_SIGNAL_SCOPE_SHARED) has_shared = 1;
 				else has_private = 1;
 				break;
 			case CRIU_SNAPSHOT_REC_ITIMERS:
-				if (has_itimers || !validate_itimers(payload, (size_t)len)) goto format_error;
+				if ((!scoped && has_itimers) ||
+				    !validate_itimers(payload, (size_t)len)) goto format_error;
 				has_itimers = 1; break;
 			case CRIU_SNAPSHOT_REC_POSIX_TIMERS:
-				if (has_posix || !validate_posix_timers(payload, (size_t)len)) goto format_error;
+				if ((!scoped && has_posix) ||
+				    !validate_posix_timers(payload, (size_t)len)) goto format_error;
 				has_posix = 1; break;
 			default: break;
 			}

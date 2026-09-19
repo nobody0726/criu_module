@@ -107,6 +107,7 @@ struct blob_list {
 struct process_model {
 	uint32_t pid;
 	size_t record_count;
+	uint64_t type_mask;
 };
 
 struct snapshot_model {
@@ -239,7 +240,8 @@ static void model_free(struct snapshot_model *model)
 	memset(model, 0, sizeof(*model));
 }
 
-static int process_model_touch(struct snapshot_model *model, uint32_t pid)
+static int process_model_add_record(struct snapshot_model *model, uint32_t pid,
+				    uint16_t type)
 {
 	struct process_model *processes;
 	size_t i;
@@ -249,6 +251,8 @@ static int process_model_touch(struct snapshot_model *model, uint32_t pid)
 	for (i = 0; i < model->process_count; i++)
 		if (model->processes[i].pid == pid) {
 			model->processes[i].record_count++;
+			if (type < 64U)
+				model->processes[i].type_mask |= 1ULL << type;
 			return 0;
 		}
 	processes = realloc(model->processes,
@@ -258,8 +262,16 @@ static int process_model_touch(struct snapshot_model *model, uint32_t pid)
 	model->processes = processes;
 	model->processes[model->process_count].pid = pid;
 	model->processes[model->process_count].record_count = 1;
+	model->processes[model->process_count].type_mask =
+		type < 64U ? 1ULL << type : 0;
 	model->process_count++;
 	return 0;
+}
+
+static __attribute__((unused)) int process_model_touch(struct snapshot_model *model,
+						       uint32_t pid)
+{
+	return process_model_add_record(model, pid, UINT16_MAX);
 }
 
 static int list_add(struct blob_list *list, const uint8_t *data, size_t len)
@@ -337,7 +349,7 @@ static int collect_records(const struct snapshot_document *doc,
 			owner = u32(payload);
 			payload += CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE;
 			len -= CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE;
-			if (process_model_touch(model, owner))
+			if (process_model_add_record(model, owner, type))
 				goto io_error;
 		}
 		if (model->pstree && owner != model->pid &&
@@ -436,7 +448,7 @@ static int collect_records(const struct snapshot_document *doc,
 			/* snapshot_read_validate() handled mandatory unknown records. */
 			break;
 		}
-		off += len;
+		off += (size_t)raw_len;
 	}
 	return 0;
 
@@ -827,12 +839,66 @@ static int validate_a6_model(const struct snapshot_model *model)
 	return 0;
 }
 
+static const struct process_model *find_process_model(
+	const struct snapshot_model *model, uint32_t pid)
+{
+	size_t i;
+
+	for (i = 0; i < model->process_count; i++)
+		if (model->processes[i].pid == pid)
+			return &model->processes[i];
+	return NULL;
+}
+
+static int pstree_index_by_pid(const struct snapshot_model *model,
+			       uint32_t pid)
+{
+	size_t i;
+
+	for (i = 0; i < model->pstree_count; i++)
+		if (u32((const uint8_t *)&model->pstree_records[i].pid) == pid)
+			return (int)i;
+	return -1;
+}
+
+static int validate_a7_indexed_model(const struct snapshot_model *model)
+{
+	size_t i;
+
+	if (!model->pstree)
+		return 0;
+	if (!model->pstree_count)
+		return SNAPSHOT_READER_FORMAT_ERROR;
+	if (!model->process_count)
+		return 0; /* schema/topology-only fixture */
+	for (i = 0; i < model->process_count; i++) {
+		const struct process_model *process = &model->processes[i];
+
+		if (pstree_index_by_pid(model, process->pid) < 0)
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	}
+	for (i = 0; i < model->pstree_count; i++) {
+		uint32_t pid = u32((const uint8_t *)&model->pstree_records[i].pid);
+		const struct process_model *process = find_process_model(model, pid);
+
+		if (!process)
+			return SNAPSHOT_READER_FORMAT_ERROR;
+	}
+	return 0;
+}
+
 static int validate_model(const struct snapshot_model *model)
 {
 	size_t i, j;
 	uint32_t expected_vmas;
 	uint64_t previous_page_end = 0;
 
+	if (model->pstree) {
+		int a7_ret = validate_a7_indexed_model(model);
+
+		if (a7_ret)
+			return a7_ret;
+	}
 	if (!model->task.data)
 		return 0;
 	if (model->signal_timers) {
@@ -2405,6 +2471,14 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		fd_object_table_free(&fd_objects);
 		model_free(&model);
 		return ret;
+	}
+	if (model.pstree && model.process_count > 1) {
+		fprintf(stderr,
+			"converter: A7 multi-process image emission is incomplete owners=%zu\n",
+			model.process_count);
+		fd_object_table_free(&fd_objects);
+		model_free(&model);
+		return SNAPSHOT_READER_UNSUPPORTED;
 	}
 	/* The format fixture intentionally carries only TASK; validate it without
 	 * attempting to synthesize a CRIU image set. */
