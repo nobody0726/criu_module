@@ -236,6 +236,26 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 		goto thaw;
 	opened = true;
 	ret = criu_dump_pstree(freeze_ctx, &writer);
+	if (!ret) {
+		unsigned int i;
+
+		for (i = 0; i < process_count && !ret; i++) {
+			struct criu_freeze_process_view view;
+
+			ret = criu_freeze_process_get(freeze_ctx, i, &view);
+			if (ret)
+				break;
+			criu_snapshot_writer_set_process_owner(&writer, view.pid);
+			ret = criu_dump_task(view.leader, &writer);
+			if (!ret)
+				ret = criu_dump_threads(view.leader, &writer);
+			if (!ret)
+				ret = criu_dump_mm(view.leader, &writer);
+			if (!ret)
+				ret = criu_dump_files(view.leader, &writer);
+		}
+		criu_snapshot_writer_set_process_owner(&writer, 0);
+	}
 	if (!ret)
 		ret = criu_snapshot_writer_record(&writer,
 						  CRIU_SNAPSHOT_REC_END,

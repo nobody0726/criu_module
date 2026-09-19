@@ -199,6 +199,9 @@ int criu_snapshot_writer_record(struct criu_snapshot_writer *w, u16 type,
 {
 	if (flags)
 		return -EINVAL;
+	if (w && w->process_owner_pid)
+		return criu_snapshot_writer_process_record(
+			w, w->process_owner_pid, type, flags, payload, length);
 	return criu_snapshot_writer_record_flags(w, type, flags, payload, length);
 }
 
@@ -228,6 +231,13 @@ int criu_snapshot_writer_process_record(struct criu_snapshot_writer *w,
 		scope_payload, total);
 	kfree(scope_payload);
 	return ret;
+}
+
+void criu_snapshot_writer_set_process_owner(
+	struct criu_snapshot_writer *writer, u32 owner_pid)
+{
+	if (writer)
+		writer->process_owner_pid = owner_pid;
 }
 
 int criu_snapshot_writer_finish(struct criu_snapshot_writer *w)

@@ -15,6 +15,7 @@ struct criu_snapshot_writer {
 	loff_t pos;
 	u64 total_size;
 	u32 record_count;
+	u32 process_owner_pid;
 	bool ended;
 };
 
@@ -27,6 +28,8 @@ int criu_snapshot_writer_record(struct criu_snapshot_writer *writer,
 int criu_snapshot_writer_process_record(struct criu_snapshot_writer *writer,
 					u32 owner_pid, u16 type, u16 flags,
 					const void *payload, u64 length);
+void criu_snapshot_writer_set_process_owner(
+	struct criu_snapshot_writer *writer, u32 owner_pid);
 int criu_snapshot_writer_finish(struct criu_snapshot_writer *writer);
 void criu_snapshot_writer_abort(struct criu_snapshot_writer *writer);
 
