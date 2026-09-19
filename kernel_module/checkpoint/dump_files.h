@@ -41,5 +41,9 @@ struct criu_fs_record {
 
 int criu_dump_files(struct task_struct *task,
 			struct criu_snapshot_writer *writer);
+int criu_dump_files_process(struct criu_freeze_ctx *ctx,
+			    unsigned int process_index,
+			    const struct criu_freeze_process_view *view,
+			    struct criu_snapshot_writer *writer);
 
 #endif

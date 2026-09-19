@@ -12,8 +12,9 @@
 
 #define CRIU_SNAPSHOT_UNSUPPORTED (-EOPNOTSUPP)
 
-int criu_dump_task(struct task_struct *task,
-			struct criu_snapshot_writer *writer)
+static int criu_dump_task_common(struct task_struct *task,
+				 const struct criu_freeze_process_view *view,
+				 struct criu_snapshot_writer *writer)
 {
 	struct criu_task_record rec;
 	struct criu_regs_record regs;
@@ -25,12 +26,18 @@ int criu_dump_task(struct task_struct *task,
 	if (!task || !writer)
 		return -EINVAL;
 	memset(&rec, 0, sizeof(rec));
-	rec.pid = task_pid_nr(task);
-	rec.tgid = task_tgid_nr(task);
-	rcu_read_lock();
-	parent = rcu_dereference(task->real_parent);
-	rec.ppid = parent ? task_pid_nr(parent) : 0;
-	rcu_read_unlock();
+	if (view) {
+		rec.pid = view->pid;
+		rec.tgid = view->tgid;
+		rec.ppid = view->ppid;
+	} else {
+		rec.pid = task_pid_nr(task);
+		rec.tgid = task_tgid_nr(task);
+		rcu_read_lock();
+		parent = rcu_dereference(task->real_parent);
+		rec.ppid = parent ? task_pid_nr(parent) : 0;
+		rcu_read_unlock();
+	}
 	rec.task_flags = READ_ONCE(task->flags);
 	rec.state = READ_ONCE(task->state);
 	cred = get_task_cred(task);
@@ -89,4 +96,18 @@ int criu_dump_task(struct task_struct *task,
 		return -EIO;
 	return criu_snapshot_writer_record(writer, CRIU_SNAPSHOT_REC_CREDS,
 					   0, &creds, sizeof(creds));
+}
+
+int criu_dump_task(struct task_struct *task,
+			struct criu_snapshot_writer *writer)
+{
+	return criu_dump_task_common(task, NULL, writer);
+}
+
+int criu_dump_task_process(const struct criu_freeze_process_view *view,
+			   struct criu_snapshot_writer *writer)
+{
+	if (!view)
+		return -EINVAL;
+	return criu_dump_task_common(view->leader, view, writer);
 }

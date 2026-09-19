@@ -6,6 +6,7 @@
 #include <linux/types.h>
 
 #include "../../include/criu_snapshot.h"
+#include "criu_kernel.h"
 #include "snapshot_writer.h"
 
 #define CRIU_SNAPSHOT_REC_TASK 1
@@ -57,5 +58,7 @@ struct criu_creds_record {
 
 int criu_dump_task(struct task_struct *task,
 			struct criu_snapshot_writer *writer);
+int criu_dump_task_process(const struct criu_freeze_process_view *view,
+			   struct criu_snapshot_writer *writer);
 
 #endif

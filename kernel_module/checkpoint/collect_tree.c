@@ -60,7 +60,8 @@ static int tree_capture_threads(struct criu_tree_process *process)
 
 	rcu_read_lock();
 	for_each_thread(process->leader, thread)
-		count++;
+		if (thread != process->leader)
+			count++;
 	rcu_read_unlock();
 	if (!count || count > CRIU_A7_MAX_TASKS_PER_PROCESS)
 		return -EOPNOTSUPP;
@@ -79,6 +80,8 @@ static int tree_capture_threads(struct criu_tree_process *process)
 	tasks[i].stopped = !!(READ_ONCE(process->leader->state) & __TASK_STOPPED);
 	i++;
 	for_each_thread(process->leader, thread) {
+		if (thread == process->leader)
+			continue;
 		if (i == count)
 			break;
 		if (READ_ONCE(thread->flags) & PF_EXITING)

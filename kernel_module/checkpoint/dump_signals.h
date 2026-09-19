@@ -27,6 +27,9 @@ struct criu_signal_capture {
 
 int criu_collect_signals(struct criu_freeze_ctx *ctx,
 			 struct criu_signal_capture *capture);
+int criu_collect_process_signals(struct criu_freeze_ctx *ctx,
+				 unsigned int process_index,
+				 struct criu_signal_capture *capture);
 int criu_emit_signals(const struct criu_signal_capture *capture,
 		      struct criu_snapshot_writer *writer);
 void criu_release_signals(struct criu_signal_capture *capture);

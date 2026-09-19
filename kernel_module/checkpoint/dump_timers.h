@@ -17,6 +17,9 @@ struct criu_timer_capture {
 
 int criu_collect_timers(struct criu_freeze_ctx *ctx,
 			struct criu_timer_capture *capture);
+int criu_collect_process_timers(struct criu_freeze_ctx *ctx,
+				unsigned int process_index,
+				struct criu_timer_capture *capture);
 int criu_emit_timers(const struct criu_timer_capture *capture,
 		     struct criu_snapshot_writer *writer);
 void criu_release_timers(struct criu_timer_capture *capture);

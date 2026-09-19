@@ -46,10 +46,10 @@ if ! patch --dry-run -p1 < "$PROCESS_SET_HEADER_PATCH_FILE" >/dev/null; then
 	echo "A7_FREEZER: PROCESS_SET_HEADER_PATCH_FAILED: $KDIR" >&2
 	exit 1
 fi
-patch -p1 < "$PROCESS_SET_HEADER_PATCH_FILE"
 if ! patch --dry-run -p1 < "$PROCESS_SET_PATCH_FILE" >/dev/null; then
 	echo "A7_FREEZER: PROCESS_SET_PATCH_FAILED: $KDIR" >&2
 	exit 1
 fi
+patch -p1 < "$PROCESS_SET_HEADER_PATCH_FILE"
 patch -p1 < "$PROCESS_SET_PATCH_FILE"
 echo "A7_FREEZER: PROCESS_SET_PATCH_APPLIED: $KDIR"

@@ -49,5 +49,7 @@ struct criu_vma_record {
 
 int criu_dump_mm(struct task_struct *task,
 		 struct criu_snapshot_writer *writer);
+int criu_dump_mm_process(const struct criu_freeze_process_view *view,
+			 struct criu_snapshot_writer *writer);
 
 #endif

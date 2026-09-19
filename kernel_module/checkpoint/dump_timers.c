@@ -119,8 +119,39 @@ unlock_timer:
 	return ret;
 }
 
-int criu_collect_timers(struct criu_freeze_ctx *ctx,
-			struct criu_timer_capture *capture)
+static bool timer_notify_tid_in_scope(struct criu_freeze_ctx *ctx,
+				      unsigned int process_index,
+				      bool process_scoped,
+				      int notify_tid)
+{
+	unsigned int count, i;
+	int ret;
+
+	if (!notify_tid)
+		return true;
+	ret = process_scoped ?
+		criu_freeze_process_task_count(ctx, process_index, &count) :
+		criu_freeze_task_count(ctx, &count);
+	if (ret)
+		return false;
+	for (i = 0; i < count; i++) {
+		struct criu_freeze_task_view view;
+
+		ret = process_scoped ?
+			criu_freeze_process_task_get(ctx, process_index, i, &view) :
+			criu_freeze_task_get(ctx, i, &view);
+		if (ret)
+			return false;
+		if (view.tid == notify_tid)
+			return true;
+	}
+	return false;
+}
+
+static int collect_timers_for_process(struct criu_freeze_ctx *ctx,
+				      unsigned int process_index,
+				      bool process_scoped,
+				      struct criu_timer_capture *capture)
 {
 	struct criu_freeze_task_view view;
 	struct k_itimer **timers = NULL;
@@ -132,7 +163,9 @@ int criu_collect_timers(struct criu_freeze_ctx *ctx,
 	if (!ctx || !capture)
 		return -EINVAL;
 	memset(capture, 0, sizeof(*capture));
-	ret = criu_freeze_task_get(ctx, 0, &view);
+	ret = process_scoped ?
+		criu_freeze_process_task_get(ctx, process_index, 0, &view) :
+		criu_freeze_task_get(ctx, 0, &view);
 	if (ret)
 		return ret;
 	capture_itimers(view.task, capture->itimers);
@@ -165,6 +198,12 @@ int criu_collect_timers(struct criu_freeze_ctx *ctx,
 					  &capture->posix[capture->posix_count]);
 		if (ret)
 			goto out;
+		if (!timer_notify_tid_in_scope(ctx, process_index,
+				process_scoped,
+				capture->posix[capture->posix_count].notify_tid)) {
+			ret = -EOPNOTSUPP;
+			goto out;
+		}
 		capture->posix_count++;
 	}
 	for (i = 1; i < capture->posix_count; i++) {
@@ -187,6 +226,19 @@ unlock_list:
 	spin_unlock_irqrestore(&view.task->sighand->siglock, irq_flags);
 	kfree(timers);
 	return ret;
+}
+
+int criu_collect_timers(struct criu_freeze_ctx *ctx,
+			struct criu_timer_capture *capture)
+{
+	return collect_timers_for_process(ctx, 0, false, capture);
+}
+
+int criu_collect_process_timers(struct criu_freeze_ctx *ctx,
+				unsigned int process_index,
+				struct criu_timer_capture *capture)
+{
+	return collect_timers_for_process(ctx, process_index, true, capture);
 }
 
 int criu_emit_timers(const struct criu_timer_capture *capture,

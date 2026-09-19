@@ -145,3 +145,11 @@ int criu_dump_mm(struct task_struct *task,
 	/* Scan only resident pages and emit inline PAGE_RUN records. */
 	return criu_dump_pages(task, writer);
 }
+
+int criu_dump_mm_process(const struct criu_freeze_process_view *view,
+			 struct criu_snapshot_writer *writer)
+{
+	if (!view)
+		return -EINVAL;
+	return criu_dump_mm(view->leader, writer);
+}

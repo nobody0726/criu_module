@@ -8,6 +8,7 @@
 #include <linux/string.h>
 
 #include "../../include/criu_snapshot.h"
+#include "criu_kernel.h"
 #include "dump_threads.h"
 
 struct criu_pinned_thread {
@@ -117,4 +118,34 @@ release:
 out:
 	kfree(threads);
 	return ret;
+}
+
+int criu_dump_process_threads(struct criu_freeze_ctx *ctx,
+			      unsigned int process_index,
+			      struct criu_snapshot_writer *writer)
+{
+	struct criu_freeze_task_view view;
+	struct criu_pinned_thread pinned;
+	unsigned int count;
+	unsigned int i;
+	int ret;
+
+	if (!ctx || !writer)
+		return -EINVAL;
+	ret = criu_freeze_process_task_count(ctx, process_index, &count);
+	if (ret)
+		return ret;
+	if (!count)
+		return -ESRCH;
+	for (i = 0; i < count; i++) {
+		ret = criu_freeze_process_task_get(ctx, process_index, i, &view);
+		if (ret)
+			return ret;
+		pinned.task = view.task;
+		pinned.tid = view.tid;
+		ret = write_thread(&pinned, writer);
+		if (ret)
+			return ret;
+	}
+	return 0;
 }

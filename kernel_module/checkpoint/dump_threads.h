@@ -7,8 +7,13 @@
 
 #include "snapshot_writer.h"
 
+struct criu_freeze_ctx;
+
 /* RCU protects enumeration only; callbacks must not sleep or perform I/O. */
 int criu_dump_threads(struct task_struct *leader,
 			struct criu_snapshot_writer *writer);
+int criu_dump_process_threads(struct criu_freeze_ctx *ctx,
+			      unsigned int process_index,
+			      struct criu_snapshot_writer *writer);
 
 #endif

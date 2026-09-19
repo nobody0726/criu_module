@@ -47,6 +47,61 @@ static int dump_revalidate(struct task_struct *task, u64 generation,
 	return ret;
 }
 
+static int dump_tree_validate_process_isolation(struct criu_freeze_ctx *ctx,
+						unsigned int process_count)
+{
+	unsigned int i, j;
+
+	for (i = 0; i < process_count; i++) {
+		struct criu_freeze_process_view left;
+		struct mm_struct *left_mm;
+		struct files_struct *left_files;
+		int ret;
+
+		ret = criu_freeze_process_get(ctx, i, &left);
+		if (ret)
+			return ret;
+		left_mm = get_task_mm(left.leader);
+		if (!left_mm)
+			return -ESRCH;
+		task_lock(left.leader);
+		left_files = left.leader->files;
+		task_unlock(left.leader);
+		if (!left_files) {
+			mmput(left_mm);
+			return -ESRCH;
+		}
+		for (j = i + 1; j < process_count; j++) {
+			struct criu_freeze_process_view right;
+			struct mm_struct *right_mm;
+			struct files_struct *right_files;
+
+			ret = criu_freeze_process_get(ctx, j, &right);
+			if (ret) {
+				mmput(left_mm);
+				return ret;
+			}
+			right_mm = get_task_mm(right.leader);
+			if (!right_mm) {
+				mmput(left_mm);
+				return -ESRCH;
+			}
+			task_lock(right.leader);
+			right_files = right.leader->files;
+			task_unlock(right.leader);
+			if (!right_files || right_mm == left_mm ||
+			    right_files == left_files) {
+				mmput(right_mm);
+				mmput(left_mm);
+				return -EOPNOTSUPP;
+			}
+			mmput(right_mm);
+		}
+		mmput(left_mm);
+	}
+	return 0;
+}
+
 int criu_dump_process(pid_t vpid, const char *path)
 {
 	struct task_struct *task = NULL;
@@ -231,6 +286,10 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 	header.pid = root_view.pid;
 	header.tgid = root_view.tgid;
 	header.freeze_generation = generation;
+	header.flags |= CRIU_SNAPSHOT_F_SIGNAL_TIMERS;
+	ret = dump_tree_validate_process_isolation(freeze_ctx, process_count);
+	if (ret)
+		goto thaw;
 	ret = criu_snapshot_writer_open(&writer, path, &header);
 	if (ret)
 		goto thaw;
@@ -246,13 +305,45 @@ int criu_dump_process_tree(pid_t vpid, const char *path)
 			if (ret)
 				break;
 			criu_snapshot_writer_set_process_owner(&writer, view.pid);
-			ret = criu_dump_task(view.leader, &writer);
+			ret = criu_dump_task_process(&view, &writer);
 			if (!ret)
-				ret = criu_dump_threads(view.leader, &writer);
+				ret = criu_dump_process_threads(freeze_ctx, i,
+								&writer);
 			if (!ret)
-				ret = criu_dump_mm(view.leader, &writer);
+				ret = criu_dump_mm_process(&view, &writer);
 			if (!ret)
-				ret = criu_dump_files(view.leader, &writer);
+				ret = criu_dump_files_process(freeze_ctx, i,
+							      &view, &writer);
+			if (!ret) {
+				struct criu_signal_capture *signal_capture;
+				struct criu_timer_capture *timer_capture;
+
+				signal_capture = kzalloc(sizeof(*signal_capture),
+							 GFP_KERNEL);
+				timer_capture = kzalloc(sizeof(*timer_capture),
+							GFP_KERNEL);
+				if (!signal_capture || !timer_capture) {
+					kfree(signal_capture);
+					kfree(timer_capture);
+					ret = -ENOMEM;
+					break;
+				}
+				ret = criu_collect_process_signals(freeze_ctx, i,
+								  signal_capture);
+				if (!ret)
+					ret = criu_collect_process_timers(
+						freeze_ctx, i, timer_capture);
+				if (!ret)
+					ret = criu_emit_signals(signal_capture,
+								&writer);
+				if (!ret)
+					ret = criu_emit_timers(timer_capture,
+							       &writer);
+				criu_release_timers(timer_capture);
+				criu_release_signals(signal_capture);
+				kfree(timer_capture);
+				kfree(signal_capture);
+			}
 		}
 		criu_snapshot_writer_set_process_owner(&writer, 0);
 	}
