@@ -12,5 +12,10 @@ int criu_cgroup_freeze_threadgroup(struct task_struct *leader,
 				   char *original_path, size_t original_len,
 				   char *temporary_path, size_t temporary_len);
 int criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *cookie);
+int criu_cgroup_freeze_process_set(struct task_struct **leaders,
+				   unsigned int leader_count,
+				   struct criu_freezer_cookie **cookie,
+				   char *original_path, size_t original_len,
+				   char *temporary_path, size_t temporary_len);
 
 #endif

@@ -1,0 +1,197 @@
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -5578,4 +5578,6 @@
+ 	struct cgroup *original;
+ 	struct cgroup *temporary;
+ 	struct task_struct *leader;
++	struct task_struct **leaders;
++	unsigned int leader_count;
+ };
+@@ -5795,3 +5797,180 @@
+ EXPORT_SYMBOL_GPL(criu_cgroup_freeze_threadgroup);
+ 
++static void criu_freezer_end_process_changes(struct task_struct **leaders,
++					     unsigned int count)
++{
++	while (count)
++		cgroup_threadgroup_change_end(leaders[--count]);
++}
++
++static int criu_freezer_thaw_process_set(struct criu_freezer_cookie *ctx)
++{
++	struct cgroup *original = ctx->original;
++	struct cgroup *temporary = ctx->temporary;
++	unsigned int i;
++	int ret = 0;
++
++	for (i = 0; i < ctx->leader_count; i++)
++		cgroup_threadgroup_change_begin(ctx->leaders[i]);
++	mutex_lock(&cgroup_mutex);
++	cgroup_freeze(temporary, false);
++	for (i = ctx->leader_count; i; i--) {
++		ret = cgroup_attach_task(original, ctx->leaders[i - 1], true);
++		if (ret)
++			break;
++	}
++	if (ret)
++		cgroup_freeze(temporary, true);
++	mutex_unlock(&cgroup_mutex);
++	criu_freezer_end_process_changes(ctx->leaders, ctx->leader_count);
++	if (ret)
++		return ret;
++
++	ret = criu_freezer_destroy_temporary(temporary);
++	if (ret)
++		return ret;
++	cgroup_put(temporary);
++	cgroup_put(original);
++	for (i = 0; i < ctx->leader_count; i++)
++		put_task_struct(ctx->leaders[i]);
++	kfree(ctx->leaders);
++	kfree(ctx);
++	return 0;
++}
++
++int criu_cgroup_freeze_process_set(struct task_struct **leaders,
++				   unsigned int leader_count,
++				   struct criu_freezer_cookie **cookie,
++				   char *original_path, size_t original_len,
++				   char *temporary_path, size_t temporary_len)
++{
++	struct criu_freezer_cookie *ctx;
++	struct cgroup *original = NULL, *temporary = NULL, *candidate;
++	unsigned int i, attached = 0;
++	bool same_cgroup = true;
++	char name[64];
++	int ret, path_len;
++
++	if (!leaders || !leader_count || !cookie || *cookie ||
++	    !original_path || !temporary_path || !original_len || !temporary_len)
++		return -EINVAL;
++	for (i = 0; i < leader_count; i++) {
++		unsigned int j;
++		if (!leaders[i] || leaders[i] != leaders[i]->group_leader)
++			return -EINVAL;
++		for (j = 0; j < i; j++)
++			if (leaders[j] == leaders[i])
++				return -EINVAL;
++	}
++	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++	ctx->leaders = kmemdup(leaders, leader_count * sizeof(*leaders), GFP_KERNEL);
++	if (!ctx->leaders) {
++		kfree(ctx);
++		return -ENOMEM;
++	}
++	ctx->leader_count = leader_count;
++	for (i = 0; i < leader_count; i++)
++		cgroup_threadgroup_change_begin(leaders[i]);
++
++	mutex_lock(&cgroup_mutex);
++	spin_lock_irq(&css_set_lock);
++	original = task_cgroup_from_root(leaders[0], &cgrp_dfl_root);
++	if (original && cgroup_on_dfl(original))
++		cgroup_get_live(original);
++	else
++		original = NULL;
++	if (original) {
++		for (i = 1; i < leader_count; i++) {
++			candidate = task_cgroup_from_root(leaders[i], &cgrp_dfl_root);
++			if (!candidate || !cgroup_on_dfl(candidate) ||
++			    candidate != original) {
++				same_cgroup = false;
++				break;
++			}
++		}
++	}
++	spin_unlock_irq(&css_set_lock);
++	if (!original || !same_cgroup) {
++		if (original)
++			cgroup_put(original);
++		ret = -EOPNOTSUPP;
++		goto out_unlock;
++	}
++	path_len = cgroup_path(original, original_path, original_len);
++	if (path_len < 0 || path_len >= original_len) {
++		ret = -ENAMETOOLONG;
++		goto out_original;
++	}
++	mutex_unlock(&cgroup_mutex);
++
++	ret = scnprintf(name, sizeof(name), "criu-freeze-set-%llu",
++			(unsigned long long)atomic64_inc_return(&criu_freezer_seq));
++	if (ret >= sizeof(name)) {
++		ret = -ENAMETOOLONG;
++		goto out_original_unlocked;
++	}
++	temporary = criu_freezer_create_child(original, name, 0755);
++	ret = PTR_ERR_OR_ZERO(temporary);
++	if (ret) {
++		temporary = NULL;
++		goto out_original_unlocked;
++	}
++	cgroup_get_live(temporary);
++	if (!strcmp(original_path, "/"))
++		ret = scnprintf(temporary_path, temporary_len, "/%s", name);
++	else
++		ret = scnprintf(temporary_path, temporary_len, "%s/%s",
++				original_path, name);
++	if (ret < 0 || ret >= temporary_len) {
++		ret = -ENAMETOOLONG;
++		goto out_temporary;
++	}
++	mutex_lock(&cgroup_mutex);
++	for (i = 0; i < leader_count; i++) {
++		ret = cgroup_attach_task(temporary, leaders[i], true);
++		if (ret)
++			break;
++		attached++;
++	}
++	if (!ret)
++		cgroup_freeze(temporary, true);
++	if (ret) {
++		cgroup_freeze(temporary, false);
++		while (attached)
++			cgroup_attach_task(original, leaders[--attached], true);
++	}
++	mutex_unlock(&cgroup_mutex);
++	if (ret)
++		goto out_temporary;
++	ctx->original = original;
++	ctx->temporary = temporary;
++	ctx->leader = leaders[0];
++	for (i = 0; i < leader_count; i++)
++		get_task_struct(ctx->leaders[i]);
++	*cookie = ctx;
++	criu_freezer_end_process_changes(leaders, leader_count);
++	return 0;
++
++out_temporary:
++	criu_freezer_destroy_temporary(temporary);
++	cgroup_put(temporary);
++out_original_unlocked:
++	cgroup_put(original);
++	criu_freezer_end_process_changes(leaders, leader_count);
++	kfree(ctx->leaders);
++	kfree(ctx);
++	return ret;
++out_original:
++	cgroup_put(original);
++out_unlock:
++	mutex_unlock(&cgroup_mutex);
++	criu_freezer_end_process_changes(leaders, leader_count);
++	kfree(ctx->leaders);
++	kfree(ctx);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(criu_cgroup_freeze_process_set);
++
+ int criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *ctx)
+@@ -5805,4 +5982,6 @@
+ 	if (!ctx || !ctx->original || !ctx->temporary || !ctx->leader)
+ 		return -EINVAL;
++	if (ctx->leaders && ctx->leader_count)
++		return criu_freezer_thaw_process_set(ctx);
+ 
+ 	original = ctx->original;
