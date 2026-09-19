@@ -108,6 +108,23 @@ struct process_model {
 	uint32_t pid;
 	size_t record_count;
 	uint64_t type_mask;
+	struct blob_ref task;
+	struct blob_ref mm;
+	struct blob_ref regs;
+	struct blob_ref fs;
+	struct blob_ref creds;
+	struct blob_list vmas;
+	struct blob_list fds;
+	struct blob_list pages;
+	struct blob_list threads;
+	struct blob_list pipe_endpoints;
+	struct blob_list pipe_data;
+	struct blob_list unix_sockets;
+	struct blob_list socket_queues;
+	struct blob_ref sigactions;
+	struct blob_list signal_queues;
+	struct blob_ref itimers;
+	struct blob_ref posix_timers;
 };
 
 struct snapshot_model {
@@ -224,6 +241,8 @@ static void put32(uint8_t *p, uint32_t value)
 
 static void model_free(struct snapshot_model *model)
 {
+	size_t i;
+
 	if (!model)
 		return;
 	free(model->vmas.items);
@@ -236,35 +255,65 @@ static void model_free(struct snapshot_model *model)
 	free(model->socket_queues.items);
 	free(model->signal_queues.items);
 	free(model->pstree_records);
+	for (i = 0; i < model->process_count; i++) {
+		free(model->processes[i].vmas.items);
+		free(model->processes[i].fds.items);
+		free(model->processes[i].pages.items);
+		free(model->processes[i].threads.items);
+		free(model->processes[i].pipe_endpoints.items);
+		free(model->processes[i].pipe_data.items);
+		free(model->processes[i].unix_sockets.items);
+		free(model->processes[i].socket_queues.items);
+		free(model->processes[i].signal_queues.items);
+	}
 	free(model->processes);
 	memset(model, 0, sizeof(*model));
+}
+
+static struct process_model *process_model_find(struct snapshot_model *model,
+						uint32_t pid)
+{
+	size_t i;
+
+	for (i = 0; i < model->process_count; i++)
+		if (model->processes[i].pid == pid)
+			return &model->processes[i];
+	return NULL;
+}
+
+static struct process_model *process_model_find_or_add(struct snapshot_model *model,
+						       uint32_t pid)
+{
+	struct process_model *processes;
+	struct process_model *process;
+
+	if (!pid)
+		return NULL;
+	process = process_model_find(model, pid);
+	if (process)
+		return process;
+	processes = realloc(model->processes,
+			    (model->process_count + 1U) * sizeof(*processes));
+	if (!processes)
+		return NULL;
+	model->processes = processes;
+	process = &model->processes[model->process_count];
+	memset(process, 0, sizeof(*process));
+	process->pid = pid;
+	model->process_count++;
+	return process;
 }
 
 static int process_model_add_record(struct snapshot_model *model, uint32_t pid,
 				    uint16_t type)
 {
-	struct process_model *processes;
-	size_t i;
+	struct process_model *process = process_model_find_or_add(model, pid);
 
-	if (!pid)
+	if (!process)
 		return -1;
-	for (i = 0; i < model->process_count; i++)
-		if (model->processes[i].pid == pid) {
-			model->processes[i].record_count++;
-			if (type < 64U)
-				model->processes[i].type_mask |= 1ULL << type;
-			return 0;
-		}
-	processes = realloc(model->processes,
-			    (model->process_count + 1U) * sizeof(*processes));
-	if (!processes)
-		return -1;
-	model->processes = processes;
-	model->processes[model->process_count].pid = pid;
-	model->processes[model->process_count].record_count = 1;
-	model->processes[model->process_count].type_mask =
-		type < 64U ? 1ULL << type : 0;
-	model->process_count++;
+	process->record_count++;
+	if (type < 64U)
+		process->type_mask |= 1ULL << type;
 	return 0;
 }
 
@@ -329,6 +378,7 @@ static int collect_records(const struct snapshot_document *doc,
 		size_t len;
 		const uint8_t *payload;
 		uint32_t owner = model->pid;
+		struct process_model *process = NULL;
 
 		if (end - off < CRIU_SNAPSHOT_TLV_HEADER_SIZE)
 			goto format_error;
@@ -351,11 +401,9 @@ static int collect_records(const struct snapshot_document *doc,
 			len -= CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE;
 			if (process_model_add_record(model, owner, type))
 				goto io_error;
-		}
-		if (model->pstree && owner != model->pid &&
-		    type != CRIU_SNAPSHOT_REC_PSTREE) {
-			off += (size_t)raw_len;
-			continue;
+			process = process_model_find(model, owner);
+			if (!process)
+				goto io_error;
 		}
 		switch (type) {
 		case CRIU_SNAPSHOT_REC_PSTREE:
@@ -374,74 +422,91 @@ static int collect_records(const struct snapshot_document *doc,
 			}
 			break;
 		case CRIU_SNAPSHOT_REC_TASK:
-			if (set_blob(&model->task, payload, len))
+			if (set_blob(process ? &process->task : &model->task,
+				     payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_MM:
-			if (set_blob(&model->mm, payload, len))
+			if (set_blob(process ? &process->mm : &model->mm,
+				     payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_VMA:
-			if (list_add(&model->vmas, payload, len))
+			if (list_add(process ? &process->vmas : &model->vmas,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_REGS:
-			if (set_blob(&model->regs, payload, len))
+			if (set_blob(process ? &process->regs : &model->regs,
+				     payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_FD:
-			if (list_add(&model->fds, payload, len))
+			if (list_add(process ? &process->fds : &model->fds,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_FS:
-			if (set_blob(&model->fs, payload, len))
+			if (set_blob(process ? &process->fs : &model->fs,
+				     payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_CREDS:
-			if (set_blob(&model->creds, payload, len))
+			if (set_blob(process ? &process->creds : &model->creds,
+				     payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_IDMAP:
 			/* A3 has no user namespace mapping; retain forward compatibility. */
 			break;
 		case CRIU_SNAPSHOT_REC_PAGE_RUN:
-			if (list_add(&model->pages, payload, len))
+			if (list_add(process ? &process->pages : &model->pages,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_THREAD:
-			if (list_add(&model->threads, payload, len))
+			if (list_add(process ? &process->threads : &model->threads,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_PIPE_ENDPOINT:
-			if (list_add(&model->pipe_endpoints, payload, len))
+			if (list_add(process ? &process->pipe_endpoints : &model->pipe_endpoints,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_PIPE_DATA:
-			if (list_add(&model->pipe_data, payload, len))
+			if (list_add(process ? &process->pipe_data : &model->pipe_data,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_UNIX_SOCKET:
-			if (list_add(&model->unix_sockets, payload, len))
+			if (list_add(process ? &process->unix_sockets : &model->unix_sockets,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_SOCKET_QUEUE:
-			if (list_add(&model->socket_queues, payload, len))
+			if (list_add(process ? &process->socket_queues : &model->socket_queues,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_SIGACTION:
-			if (set_blob(&model->sigactions, payload, len))
+			if (set_blob(process ? &process->sigactions : &model->sigactions,
+				     payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_SIGNAL_QUEUE:
-			if (list_add(&model->signal_queues, payload, len))
+			if (list_add(process ? &process->signal_queues : &model->signal_queues,
+				     payload, len))
 				goto io_error;
 			break;
 		case CRIU_SNAPSHOT_REC_ITIMERS:
-			if (set_blob(&model->itimers, payload, len))
+			if (set_blob(process ? &process->itimers : &model->itimers,
+				     payload, len))
 				goto format_error;
 			break;
 		case CRIU_SNAPSHOT_REC_POSIX_TIMERS:
-			if (set_blob(&model->posix_timers, payload, len))
+			if (set_blob(process ? &process->posix_timers : &model->posix_timers,
+				     payload, len))
 				goto format_error;
 			break;
 		default:
@@ -2228,11 +2293,18 @@ static int build_fdinfo(const struct file_table *files, unsigned fd,
 				struct image_writer *message)
 {
 	const struct file_item *item;
+	size_t i;
 
-	if (fd >= files->binding_count || !files->bindings[fd].id ||
-		files->bindings[fd].id > files->count)
+	if (fd >= files->binding_count || !files->bindings[fd].id)
 		return -1;
-	item = &files->items[files->bindings[fd].id - 1U];
+	item = NULL;
+	for (i = 0; i < files->count; i++)
+		if (files->items[i].id == files->bindings[fd].id) {
+			item = &files->items[i];
+			break;
+		}
+	if (!item)
+		return -1;
 	return image_writer_field_varint(message, 1, files->bindings[fd].id) ||
 		image_writer_field_varint(message, 2, files->bindings[fd].flags) ||
 		image_writer_field_varint(message, 3, criu_file_type(item->type)) ||
@@ -2289,8 +2361,19 @@ static int build_pstree(const struct snapshot_model *model,
 		image_writer_field_varint(message, 3, pgid) ||
 		image_writer_field_varint(message, 4, sid))
 		return -1;
-	if (model->pstree_count)
+	if (model->pstree_count) {
+		const struct process_model *process =
+			find_process_model(model, pid);
+
+		if (process && process->threads.count) {
+			for (i = 0; i < process->threads.count; i++)
+				if (image_writer_field_varint(message, 5,
+						u32(process->threads.items[i].data)))
+					return -1;
+			return 0;
+		}
 		return image_writer_field_varint(message, 5, pid);
+	}
 	if (model->threads.count) {
 		for (i = 0; i < model->threads.count; i++)
 			if (image_writer_field_varint(message, 5,
@@ -2431,6 +2514,325 @@ static int emit_messages_with_raw(const char *dir, const char *name, uint32_t ma
 				records, count);
 }
 
+static void model_view_for_process(const struct snapshot_model *base,
+				   const struct process_model *process,
+				   struct snapshot_model *view)
+{
+	memset(view, 0, sizeof(*view));
+	view->task = process->task;
+	view->mm = process->mm;
+	view->regs = process->regs;
+	view->fs = process->fs;
+	view->creds = process->creds;
+	view->vmas = process->vmas;
+	view->fds = process->fds;
+	view->pages = process->pages;
+	view->threads = process->threads;
+	view->pipe_endpoints = process->pipe_endpoints;
+	view->pipe_data = process->pipe_data;
+	view->unix_sockets = process->unix_sockets;
+	view->socket_queues = process->socket_queues;
+	view->sigactions = process->sigactions;
+	view->signal_queues = process->signal_queues;
+	view->itimers = process->itimers;
+	view->posix_timers = process->posix_timers;
+	view->arch = base->arch;
+	view->page_size = base->page_size;
+	view->pid = process->pid;
+	view->tgid = process->pid;
+	view->signal_timers = base->signal_timers;
+}
+
+static int offset_file_table(struct file_table *files, uint32_t offset)
+{
+	size_t i;
+
+	if (!offset)
+		return 0;
+	for (i = 0; i < files->count; i++) {
+		if (files->items[i].id > UINT32_MAX - offset)
+			return -1;
+		files->items[i].id += offset;
+	}
+	for (i = 0; i < files->binding_count; i++) {
+		if (files->bindings[i].id > UINT32_MAX - offset)
+			return -1;
+		files->bindings[i].id += offset;
+	}
+	if (files->exe_id > UINT32_MAX - offset ||
+	    files->cwd_id > UINT32_MAX - offset ||
+	    files->root_id > UINT32_MAX - offset)
+		return -1;
+	files->exe_id += offset;
+	files->cwd_id += offset;
+	files->root_id += offset;
+	return 0;
+}
+
+static int append_message(struct image_writer **items, size_t *count,
+			  size_t *capacity, struct image_writer *message)
+{
+	struct image_writer *new_items;
+	size_t new_capacity;
+
+	if (*count == *capacity) {
+		new_capacity = *capacity ? *capacity * 2U : 8U;
+		if (new_capacity < *capacity ||
+		    new_capacity > SIZE_MAX / sizeof(*new_items))
+			return -1;
+		new_items = realloc(*items, new_capacity * sizeof(*new_items));
+		if (!new_items)
+			return -1;
+		*items = new_items;
+		*capacity = new_capacity;
+	}
+	(*items)[(*count)++] = *message;
+	memset(message, 0, sizeof(*message));
+	return 0;
+}
+
+static int append_raw(uint8_t **data, size_t *len, size_t *capacity,
+		      const uint8_t *payload, size_t payload_len)
+{
+	uint8_t *new_data;
+	size_t new_capacity;
+
+	if (!payload_len)
+		return 0;
+	if (*len > SIZE_MAX - payload_len)
+		return -1;
+	if (*len + payload_len > *capacity) {
+		new_capacity = *capacity ? *capacity * 2U : 4096U;
+		while (new_capacity < *len + payload_len) {
+			if (new_capacity > SIZE_MAX / 2U) {
+				new_capacity = *len + payload_len;
+				break;
+			}
+			new_capacity *= 2U;
+		}
+		new_data = realloc(*data, new_capacity);
+		if (!new_data)
+			return -1;
+		*data = new_data;
+		*capacity = new_capacity;
+	}
+	memcpy(*data + *len, payload, payload_len);
+	*len += payload_len;
+	return 0;
+}
+
+static int emit_a7_image_directory(const struct snapshot_model *model,
+				   const struct criu_convert_options *options)
+{
+	struct image_writer message;
+	struct image_writer *file_messages = NULL;
+	struct image_writer *reg_messages = NULL;
+	size_t file_count = 0, file_capacity = 0;
+	size_t reg_count = 0, reg_capacity = 0;
+	uint8_t *page_data = NULL;
+	size_t page_data_len = 0, page_data_capacity = 0;
+	char name[64];
+	size_t i, j;
+	int ret = SNAPSHOT_READER_IO_ERROR;
+
+	if (mkdir(options->output_dir, 0700) < 0 && errno != EEXIST)
+		return SNAPSHOT_READER_IO_ERROR;
+	image_writer_init(&message);
+	if (build_inventory(&message) ||
+	    emit_messages(options->output_dir, "inventory.img", INVENTORY_MAGIC,
+			  &message, 1, true))
+		goto out_message;
+	message.len = 0;
+	{
+		struct image_writer *pstree_messages =
+			calloc(model->pstree_count, sizeof(*pstree_messages));
+
+		if (!pstree_messages)
+			goto out_message;
+		for (i = 0; i < model->pstree_count; i++) {
+			image_writer_init(&pstree_messages[i]);
+			if (build_pstree(model, &pstree_messages[i], i)) {
+				free_messages(pstree_messages, model->pstree_count);
+				goto out_message;
+			}
+		}
+		if (emit_messages(options->output_dir, "pstree.img", PSTREE_MAGIC,
+				  pstree_messages, model->pstree_count, false)) {
+			free_messages(pstree_messages, model->pstree_count);
+			goto out_message;
+		}
+		free_messages(pstree_messages, model->pstree_count);
+	}
+	for (i = 0; i < model->process_count; i++) {
+		const struct process_model *process = &model->processes[i];
+		struct snapshot_model view;
+		struct file_table files;
+		struct image_writer *fd_messages = NULL;
+		struct image_writer *page_messages = NULL;
+		uint8_t *process_page_data = NULL;
+		size_t fd_count = 0, page_count = 0, process_page_len = 0;
+		uint32_t id_offset;
+		char comm[TASK_COMM_SIZE];
+
+		model_view_for_process(model, process, &view);
+		if (validate_model(&view))
+			goto out_message;
+		if (build_file_table(&view, &files))
+			goto out_message;
+		id_offset = (uint32_t)file_count;
+		if (file_count > UINT32_MAX || offset_file_table(&files, id_offset)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		task_comm(&view.task, comm);
+		for (j = 0; j < view.threads.count; j++) {
+			const struct blob_ref *thread = &view.threads.items[j];
+			uint32_t tid = u32(thread->data);
+
+			message.len = 0;
+			if (build_core(&view, &view.regs, thread, tid == process->pid,
+				       comm, &message)) {
+				file_table_free(&files);
+				goto out_message;
+			}
+			snprintf(name, sizeof(name), "core-%u.img", tid);
+			if (emit_messages(options->output_dir, name, CORE_MAGIC,
+					  &message, 1, false)) {
+				file_table_free(&files);
+				goto out_message;
+			}
+		}
+		message.len = 0;
+		if (build_mm(&view, &files, &message)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		snprintf(name, sizeof(name), "mm-%u.img", process->pid);
+		if (emit_messages(options->output_dir, name, MM_MAGIC,
+				  &message, 1, false)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		message.len = 0;
+		if (build_page_messages(&view, &page_messages, &page_count,
+					&process_page_data, &process_page_len)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		snprintf(name, sizeof(name), "pagemap-%u.img", process->pid);
+		if (emit_messages(options->output_dir, name, PAGEMAP_MAGIC,
+				  page_messages, page_count, false) ||
+		    append_raw(&page_data, &page_data_len, &page_data_capacity,
+			       process_page_data, process_page_len)) {
+			free_messages(page_messages, page_count);
+			free(process_page_data);
+			file_table_free(&files);
+			goto out_message;
+		}
+		free_messages(page_messages, page_count);
+		free(process_page_data);
+		for (j = 0; j < files.count; j++) {
+			struct image_writer file_message;
+			struct image_writer reg_message;
+
+			image_writer_init(&file_message);
+			image_writer_init(&reg_message);
+			if (build_file_entry(&files.items[j], &view.creds, &view,
+					     &file_message) ||
+			    append_message(&file_messages, &file_count,
+					   &file_capacity, &file_message)) {
+				image_writer_free(&file_message);
+				image_writer_free(&reg_message);
+				file_table_free(&files);
+				goto out_message;
+			}
+			if (files.items[j].type == CRIU_FD_TYPE_REG) {
+				if (build_reg_file(&files.items[j], &view.creds,
+						   &reg_message) ||
+				    append_message(&reg_messages, &reg_count,
+						   &reg_capacity, &reg_message)) {
+					image_writer_free(&reg_message);
+					file_table_free(&files);
+					goto out_message;
+				}
+			} else {
+				image_writer_free(&reg_message);
+			}
+		}
+		fd_messages = calloc(files.binding_count, sizeof(*fd_messages));
+		if (!fd_messages) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		for (j = 0; j < files.binding_count; j++) {
+			image_writer_init(&fd_messages[j]);
+			if (build_fdinfo(&files, (unsigned)j, &fd_messages[j])) {
+				free_messages(fd_messages, files.binding_count);
+				file_table_free(&files);
+				goto out_message;
+			}
+			fd_count++;
+		}
+		snprintf(name, sizeof(name), "fdinfo-%u.img", process->pid);
+		if (emit_messages(options->output_dir, name, FDINFO_MAGIC,
+				  fd_messages, fd_count, false)) {
+			free_messages(fd_messages, files.binding_count);
+			file_table_free(&files);
+			goto out_message;
+		}
+		free_messages(fd_messages, files.binding_count);
+		message.len = 0;
+		if (build_ids(&message)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		snprintf(name, sizeof(name), "ids-%u.img", process->pid);
+		if (emit_messages(options->output_dir, name, IDS_MAGIC,
+				  &message, 1, false)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		message.len = 0;
+		if (build_fs(&files, &message)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		snprintf(name, sizeof(name), "fs-%u.img", process->pid);
+		if (emit_messages(options->output_dir, name, FS_MAGIC,
+				  &message, 1, false)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		message.len = 0;
+		if (build_creds(&view.creds, &message)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		snprintf(name, sizeof(name), "creds-%u.img", process->pid);
+		if (emit_messages(options->output_dir, name, CREDS_MAGIC,
+				  &message, 1, false)) {
+			file_table_free(&files);
+			goto out_message;
+		}
+		file_table_free(&files);
+	}
+	if (emit_messages(options->output_dir, "files.img", FILES_MAGIC,
+			  file_messages, file_count, false) ||
+	    emit_messages(options->output_dir, "reg-files.img", REG_FILES_MAGIC,
+			  reg_messages, reg_count, false) ||
+	    emit_raw(options->output_dir, "pages-1.img", page_data,
+		     page_data_len))
+		goto out_message;
+	ret = 0;
+
+out_message:
+	image_writer_free(&message);
+	free_messages(file_messages, file_count);
+	free_messages(reg_messages, reg_count);
+	free(page_data);
+	return ret;
+}
+
 static int emit_image_directory(const struct snapshot_document *doc,
 			 const struct criu_convert_options *options)
 {
@@ -2458,6 +2860,13 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		fprintf(stderr, "converter: collect_records rc=%d\n", ret);
 		return ret;
 	}
+	if (model.pstree && model.process_count) {
+		ret = validate_a7_indexed_model(&model);
+		if (!ret)
+			ret = emit_a7_image_directory(&model, options);
+		model_free(&model);
+		return ret;
+	}
 	ret = build_fd_object_table(&model, &fd_objects);
 	if (ret) {
 		fprintf(stderr, "converter: build_fd_object_table rc=%d\n", ret);
@@ -2471,14 +2880,6 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		fd_object_table_free(&fd_objects);
 		model_free(&model);
 		return ret;
-	}
-	if (model.pstree && model.process_count > 1) {
-		fprintf(stderr,
-			"converter: A7 multi-process image emission is incomplete owners=%zu\n",
-			model.process_count);
-		fd_object_table_free(&fd_objects);
-		model_free(&model);
-		return SNAPSHOT_READER_UNSUPPORTED;
 	}
 	/* The format fixture intentionally carries only TASK; validate it without
 	 * attempting to synthesize a CRIU image set. */
