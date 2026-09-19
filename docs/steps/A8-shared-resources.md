@@ -12,6 +12,21 @@
 > [03-memory-and-vma](../principles/03-memory-and-vma.md)、
 > [10-vma-semantics-and-attributes](../principles/10-vma-semantics-and-attributes.md)
 
+## 当前执行状态
+
+- [x] A8.1 ABI、closure-wide object map、真实 task object IDs
+- [x] A8.1 共享 fd table/file object
+- [x] A8.1 跨进程 pipe/UNIX stream socket
+- [x] A8.1 Linux 5.10.29 guest cross-restore gate
+- [ ] A8.2 shared-memory snapshot records/converter model
+- [ ] A8.2 shared-memory guest gate
+- [ ] SysV shm feasibility branch
+- [ ] A8 regression/review/release
+
+A8.1 的 guest gate 已使用 Lima 本地 `/tmp` staging，并验证 PID 存活、
+跨进程 pipe/UNIX socket 行为以及 guest `dmesg` 无内核错误。下一步从
+A8.2 的 shared-memory contract（先 RED，再实现）开始。
+
 ---
 
 ## 1. 设计思路

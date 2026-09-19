@@ -134,7 +134,8 @@ fdinfo-$files_id.img  == one image per unique files_id
 - Create: `tests/progs/shared-fdt.c`
 - Create: `tests/progs/shared-file-offset.c`
 - Create: `tests/a8-shared-fdtable.sh`
-- Create: `tests/a8-shared-file-offset.sh`
+- The shared file-offset fixture is covered by `tests/a8-shared-fdtable.sh`; the
+  guest behavior gate is covered by `tests/a8-cross-restore-fd.sh`.
 
 **Steps:**
 
@@ -154,8 +155,7 @@ fdinfo-$files_id.img  == one image per unique files_id
 
 - Modify: `kernel_module/checkpoint/dump_files.c`
 - Modify: `userspace/criu-module-convert/criu_model.c`
-- Create: `tests/progs/a8-cross-pipe.c`
-- Create: `tests/progs/a8-cross-unix.c`
+- Create: `tests/progs/a8-cross-fd.c`
 - Create: `tests/a8-cross-ipc.sh`
 
 **Steps:**
@@ -295,4 +295,3 @@ fdinfo-$files_id.img  == one image per unique files_id
 - [ ] A3-A7 core regressions still pass.
 - [ ] Guest dmesg is clean after A8 gates.
 - [ ] Documentation records unsupported and post-A9 extension items.
-
