@@ -1,20 +1,39 @@
 # A6 验证记录
 
-日期：2026-09-18
+日期：2026-09-19
 
 环境：macOS 宿主机，Lima `criu-dev` 构建 ARM64 模块和静态 fixture，嵌套
 Linux 5.10.29/aarch64 QEMU guest 执行 `insmod`、dump、converter 和真实 CRIU
 restore。CRIU 验证器来自 `/Users/yhome/workspace/source_code/criu_module/criu`。
 
-通过的定向检查：
+通过的 host-side 检查（均在 Lima `criu-dev` 中执行）：
 
 - `make -C kernel_module KDIR=/home/yhome.guest/kernels/linux-5.10.29`
+- `make -C userspace/criu-module-convert clean all LDFLAGS=`
+- `make -C tests/progs clean all`
 - `tests/a6-abi-contract.sh`
+- `tests/a6-converter-images.sh`
 - `tests/a6-unsupported.sh`
 - `tests/snapshot-format.sh`
 - `tests/converter-format.sh`
 - `tests/a5-converter-fds.sh`
-- `scripts/run-qemu.sh --ci --script tests/a6-cross-restore.sh`
+- `tests/dump-task-contract.sh`
+
+`dump-task-contract.sh` 使用系统自带的 `grep -Eq`，不再依赖 Lima
+环境中未预装的 `rg`。
+
+真实 guest 门禁使用：
+
+```bash
+CRIU_SOURCE=/Users/yhome/workspace/source_code/criu_module/criu \
+  ./scripts/run-qemu.sh --ci --script tests/a6-cross-restore.sh
+```
+
+`run-qemu.sh` 会把 ARM64 CRIU 二进制和 `crit`/`lib` staging 到 nested
+guest；如果没有提供 `CRIU_SOURCE` 且 worktree 不含 CRIU checkout，门禁会
+按设计返回 `SKIP: CRIU unavailable`，不能据此声称 cross-restore 已通过。
+
+最终通过的 guest 门禁：
 
 最后一项输出：
 

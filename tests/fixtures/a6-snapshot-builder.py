@@ -49,7 +49,11 @@ def itimers():
 
 
 def posix_timers():
-    return struct.pack("<IIII", 1, 0, 56, 0)
+    header = struct.pack("<IIII", 1, 1, 56, 0)
+    entry = struct.pack(
+        "<IIIIIIIIQQQ", 1, 1, 10, 4, 1, 2, 0, 0, 0x1234, 1000000, 500000
+    )
+    return header + entry
 
 
 def posix_timer_with_target(tid):
@@ -58,6 +62,45 @@ def posix_timer_with_target(tid):
         "<IIIIIIIIQQQ", 1, 1, 10, 4, 2, 0, tid, 0, 0, 0, 0
     )
     return header + entry
+
+
+def fixed_path(path, size=512):
+    raw = path.encode()
+    assert len(raw) < size
+    return raw + b"\0" * (size - len(raw))
+
+
+def base_records():
+    """Build the smallest complete process model accepted by the converter."""
+    records = []
+    task = struct.pack("<7I2QI", 1234, 1234, 1, 1000, 1000, 1000, 1000,
+                       0x40000000, 0, 16)
+    task += b"\0" * 24
+    task += b"".join(struct.pack("<2Q", 0xffffffffffffffff,
+                                 0xffffffffffffffff) for _ in range(16))
+    task += fixed_path("a6-full", 16)
+    records.append((1, task))
+
+    regs = bytearray(336)
+    for i in range(31):
+        struct.pack_into("<Q", regs, i * 8, 0x1000 + i)
+    struct.pack_into("<Q", regs, 248, 0x700000)
+    struct.pack_into("<Q", regs, 256, 0x400120)
+    struct.pack_into("<Q", regs, 264, 0x60001000)
+    records.append((4, struct.pack("<I", len(regs)) + regs +
+                    struct.pack("<Q", 0x12345000)))
+    records.append((2, struct.pack("<2I12Q2I", 1234, 1234,
+                                   *([0] * 12), 1, 0)))
+    records.append((3, struct.pack(
+        "<3Q5I6Q512s", 0x400000, 0x401000, 0, 5, 0, 0, 2, 0,
+        0, 0, 1, 0, 0, 0, fixed_path("[heap]"))))
+    records.append((5, struct.pack(
+        "<2I5Q512s", 0, 0o20666, 0, 0, 1, 20, 0,
+        fixed_path("/dev/null"))))
+    records.append((6, fixed_path("/tmp") + fixed_path("/")))
+    records.append((7, struct.pack("<9I", *([1000] * 8 + [0])) +
+                    struct.pack("<10I", *([0] * 10))))
+    return records
 
 
 def build(records, flags=A6_FLAG):
@@ -76,8 +119,7 @@ def build(records, flags=A6_FLAG):
 
 
 def valid_records():
-    return [
-        (1, b"a6-fixture"),
+    return base_records() + [
         (SIGACTION, sigactions()),
         (SIGNAL_QUEUE, queue(1, 0)),
         (SIGNAL_QUEUE, queue(2, 1234)),
