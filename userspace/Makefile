@@ -1,4 +1,4 @@
-SUBDIRS = criu-module-convert criu-shim
+SUBDIRS = criu-module-convert criu-shim mini-restore
 
 .PHONY: all clean $(SUBDIRS)
 
