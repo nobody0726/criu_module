@@ -1,14 +1,12 @@
 --- a/include/linux/criu_freezer.h
 +++ b/include/linux/criu_freezer.h
-@@ -16,1 +16,6 @@
- int criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *cookie);
+@@ -16,0 +17,5 @@ int criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *cookie);
 +int criu_cgroup_freeze_process_set(struct task_struct **leaders,
 +				   unsigned int leader_count,
 +				   struct criu_freezer_cookie **cookie,
 +				   char *original_path, size_t original_len,
 +				   char *temporary_path, size_t temporary_len);
-@@ -30,1 +30,11 @@
- }
+@@ -30,0 +36,10 @@ criu_cgroup_thaw_threadgroup(struct criu_freezer_cookie *cookie)
 +
 +static inline int
 +criu_cgroup_freeze_process_set(struct task_struct **leaders,

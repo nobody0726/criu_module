@@ -7,7 +7,7 @@
 +	struct task_struct **leaders;
 +	unsigned int leader_count;
  };
-@@ -5795,3 +5797,180 @@
+@@ -5795,3 +5797,176 @@
  EXPORT_SYMBOL_GPL(criu_cgroup_freeze_threadgroup);
  
 +static void criu_freezer_end_process_changes(struct task_struct *leader)

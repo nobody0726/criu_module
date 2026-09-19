@@ -1,0 +1,354 @@
+--- a/include/uapi/linux/criu_restore.h
++++ b/include/uapi/linux/criu_restore.h
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _UAPI_LINUX_CRIU_RESTORE_H
++#define _UAPI_LINUX_CRIU_RESTORE_H
++
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++#define CRIU_RESTORE_ABI_VERSION 1U
++#define CRIU_RESTORE_MAX_VMAS 4096U
++#define CRIU_RESTORE_VMA_RECORD_SIZE 40U
++#define CRIU_RESTORE_VALIDATE_V1_SIZE 104U
++#define CRIU_RESTORE_COMMIT_V1_SIZE 16U
++
++#define CRIU_RESTORE_PLAN_F_NONE 0U
++#define CRIU_RESTORE_PLAN_F_VDSO_SAME_ADDRESS (1U << 0)
++#define CRIU_RESTORE_PLAN_F_KNOWN \
++	(CRIU_RESTORE_PLAN_F_VDSO_SAME_ADDRESS)
++
++#define CRIU_RESTORE_VMA_F_NONE 0U
++#define CRIU_RESTORE_VMA_F_GROWSDOWN (1U << 0)
++#define CRIU_RESTORE_VMA_F_FILE_CLEAN (1U << 1)
++#define CRIU_RESTORE_VMA_F_STAGING_WRITABLE (1U << 2)
++#define CRIU_RESTORE_VMA_F_KNOWN \
++	(CRIU_RESTORE_VMA_F_GROWSDOWN | CRIU_RESTORE_VMA_F_FILE_CLEAN | \
++	 CRIU_RESTORE_VMA_F_STAGING_WRITABLE)
++
++enum criu_restore_vma_kind {
++	CRIU_RESTORE_VMA_ANON_PRIVATE = 1,
++	CRIU_RESTORE_VMA_FILE_PRIVATE = 2,
++	CRIU_RESTORE_VMA_STACK = 3,
++	CRIU_RESTORE_VMA_VDSO = 4,
++};
++
++struct criu_restore_vma_v1 {
++	__u64 staging_start;
++	__u64 target_start;
++	__u64 length;
++	__u32 prot;
++	__u32 map_flags;
++	__u32 kind;
++	__u32 flags;
++} __attribute__((packed));
++
++/*
++ * VALIDATE input. vmas_user_ptr is VALIDATE only; the kernel copies the
++ * fixed-width plan and VMA array into the transaction before returning.
++ */
++struct criu_restore_plan_v1 {
++	__u32 version;
++	__u32 size;
++	__u32 vma_count;
++	__u32 flags;
++	__u32 target_pid;
++	__u32 reserved0;
++	__u64 vmas_user_ptr;
++	__u64 bootstrap_code_start;
++	__u64 bootstrap_code_end;
++	__u64 bootstrap_pc;
++	__u64 bootstrap_stack_start;
++	__u64 bootstrap_stack_end;
++	__u64 bootstrap_sp;
++	__u64 sigframe_staging_sp;
++	__u64 sigframe_final_sp;
++	__u64 tls;
++} __attribute__((packed));
++
++/*
++ * COMMIT input. It deliberately contains no address, VMA, or user pointer:
++ * COMMIT must not dereference user memory. The kernel operates only on the
++ * transaction-owned plan copied by VALIDATE.
++ */
++struct criu_restore_commit_v1 {
++	__u32 version;
++	__u32 size;
++	__u32 flags;
++	__u32 reserved0;
++} __attribute__((packed));
++
++#define CRIU_RESTORE_IOC_MAGIC 'R'
++#define CRIU_RESTORE_VALIDATE_V1 \
++	_IOW(CRIU_RESTORE_IOC_MAGIC, 0x01, struct criu_restore_plan_v1)
++#define CRIU_RESTORE_COMMIT_V1 \
++	_IOW(CRIU_RESTORE_IOC_MAGIC, 0x02, struct criu_restore_commit_v1)
++
++#endif /* _UAPI_LINUX_CRIU_RESTORE_H */
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -13,6 +13,8 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+ 	    async.o range.o smpboot.o ucount.o regset.o
++
++obj-y += criu_restore.o
+ 
+ obj-$(CONFIG_USERMODE_DRIVER) += usermode_driver.o
+ obj-$(CONFIG_MODULES) += kmod.o
+--- a/kernel/criu_restore.c
++++ b/kernel/criu_restore.c
+@@ -0,0 +1,252 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Minimal CRIU restore transaction device for the criu_module B1 track.
++ *
++ * This scaffold establishes /dev/criu_restore, a per-open transaction, and
++ * the VALIDATE/COMMIT boundary.  Later patches fill in actual VMA commit
++ * semantics; this file already enforces that COMMIT only uses the plan copied
++ * during VALIDATE and that the caller is the target carrier PID.
++ */
++#include <linux/capability.h>
++#include <linux/cred.h>
++#include <linux/errno.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/overflow.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <uapi/linux/criu_restore.h>
++
++enum restore_tx_state {
++	RESTORE_TX_OPEN = 0,
++	RESTORE_TX_VALIDATED,
++	RESTORE_TX_COMMITTING,
++	RESTORE_TX_COMMITTED,
++	RESTORE_TX_FAILED,
++};
++
++struct criu_restore_tx {
++	struct mutex lock;
++	enum restore_tx_state state;
++	const struct cred *opener_cred;
++	struct criu_restore_plan_v1 plan;
++	struct criu_restore_vma_v1 *vmas;
++};
++
++static bool criu_restore_bad_range(__u64 start, __u64 length)
++{
++	if (!length)
++		return true;
++	if (start & ~PAGE_MASK)
++		return true;
++	if (length & ~PAGE_MASK)
++		return true;
++	if (start + length <= start)
++		return true;
++	return false;
++}
++
++static bool criu_restore_known_vma_kind(__u32 kind)
++{
++	return kind == CRIU_RESTORE_VMA_ANON_PRIVATE ||
++	       kind == CRIU_RESTORE_VMA_FILE_PRIVATE ||
++	       kind == CRIU_RESTORE_VMA_STACK ||
++	       kind == CRIU_RESTORE_VMA_VDSO;
++}
++
++static int criu_restore_validate_vmas(const struct criu_restore_plan_v1 *plan,
++				      const struct criu_restore_vma_v1 *vmas)
++{
++	u32 i, j;
++
++	for (i = 0; i < plan->vma_count; i++) {
++		const struct criu_restore_vma_v1 *vma = &vmas[i];
++		__u64 start = vma->target_start;
++		__u64 end = start + vma->length;
++
++		if (criu_restore_bad_range(vma->staging_start, vma->length) ||
++		    criu_restore_bad_range(vma->target_start, vma->length))
++			return -EINVAL;
++		if (!criu_restore_known_vma_kind(vma->kind))
++			return -EOPNOTSUPP;
++		if (vma->flags & ~CRIU_RESTORE_VMA_F_KNOWN)
++			return -EOPNOTSUPP;
++		for (j = 0; j < i; j++) {
++			__u64 old_start = vmas[j].target_start;
++			__u64 old_end = old_start + vmas[j].length;
++
++			if (start < old_end && old_start < end)
++				return -EINVAL;
++		}
++	}
++	return 0;
++}
++
++static int criu_restore_validate_plan(struct criu_restore_tx *tx,
++				      unsigned long arg)
++{
++	struct criu_restore_plan_v1 plan;
++	struct criu_restore_vma_v1 *vmas = NULL;
++	void __user *vmas_user;
++	size_t bytes;
++	int ret;
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	if (copy_from_user(&plan, (void __user *)arg, sizeof(plan)))
++		return -EFAULT;
++	if (plan.version != CRIU_RESTORE_ABI_VERSION ||
++	    plan.size != sizeof(plan) ||
++	    (plan.flags & ~CRIU_RESTORE_PLAN_F_KNOWN) ||
++	    !plan.target_pid ||
++	    plan.reserved0)
++		return -EINVAL;
++	if (!plan.vma_count || plan.vma_count > CRIU_RESTORE_MAX_VMAS)
++		return -EINVAL;
++	if (check_mul_overflow((size_t)plan.vma_count, sizeof(*vmas), &bytes))
++		return -EINVAL;
++
++	vmas = kmalloc(bytes, GFP_KERNEL);
++	if (!vmas)
++		return -ENOMEM;
++	vmas_user = (void __user *)(unsigned long)plan.vmas_user_ptr;
++	if (copy_from_user(vmas, vmas_user, bytes)) {
++		ret = -EFAULT;
++		goto out_free;
++	}
++
++	ret = criu_restore_validate_vmas(&plan, vmas);
++	if (ret)
++		goto out_free;
++
++	mutex_lock(&tx->lock);
++	if (tx->state != RESTORE_TX_OPEN) {
++		ret = -EBUSY;
++		goto out_unlock;
++	}
++	tx->plan = plan;
++	tx->vmas = vmas;
++	tx->state = RESTORE_TX_VALIDATED;
++	vmas = NULL;
++	ret = 0;
++out_unlock:
++	mutex_unlock(&tx->lock);
++out_free:
++	kfree(vmas);
++	return ret;
++}
++
++static int criu_restore_commit(struct criu_restore_tx *tx, unsigned long arg)
++{
++	struct criu_restore_commit_v1 commit;
++	int ret = 0;
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	if (copy_from_user(&commit, (void __user *)arg, sizeof(commit)))
++		return -EFAULT;
++	if (commit.version != CRIU_RESTORE_ABI_VERSION ||
++	    commit.size != sizeof(commit) ||
++	    commit.flags ||
++	    commit.reserved0)
++		return -EINVAL;
++
++	mutex_lock(&tx->lock);
++	if (tx->state != RESTORE_TX_VALIDATED) {
++		ret = -EINVAL;
++		goto out;
++	}
++	/* COMMIT is authorized by the carrier's current->pid / target_pid. */
++	if (task_pid_nr(current) != tx->plan.target_pid) {
++		ret = -EPERM;
++		goto out;
++	}
++
++	tx->state = RESTORE_TX_COMMITTING;
++	/*
++	 * Task 2 deliberately stops at the transaction scaffold.  Task 4
++	 * replaces this no-op with the one-way VMA commit operation.
++	 */
++	tx->state = RESTORE_TX_COMMITTED;
++out:
++	if (ret && tx->state == RESTORE_TX_COMMITTING)
++		tx->state = RESTORE_TX_FAILED;
++	mutex_unlock(&tx->lock);
++	return ret;
++}
++
++static long criu_restore_ioctl(struct file *file, unsigned int cmd,
++			       unsigned long arg)
++{
++	struct criu_restore_tx *tx = file->private_data;
++
++	if (!tx)
++		return -EINVAL;
++	switch (cmd) {
++	case CRIU_RESTORE_VALIDATE_V1:
++		return criu_restore_validate_plan(tx, arg);
++	case CRIU_RESTORE_COMMIT_V1:
++		return criu_restore_commit(tx, arg);
++	default:
++		return -ENOTTY;
++	}
++}
++
++static int criu_restore_open(struct inode *inode, struct file *file)
++{
++	struct criu_restore_tx *tx;
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	tx = kzalloc(sizeof(*tx), GFP_KERNEL);
++	if (!tx)
++		return -ENOMEM;
++	mutex_init(&tx->lock);
++	tx->state = RESTORE_TX_OPEN;
++	tx->opener_cred = get_current_cred();
++	file->private_data = tx;
++	return 0;
++}
++
++static int criu_restore_release(struct inode *inode, struct file *file)
++{
++	struct criu_restore_tx *tx = file->private_data;
++
++	if (!tx)
++		return 0;
++	kfree(tx->vmas);
++	if (tx->opener_cred)
++		put_cred(tx->opener_cred);
++	kfree(tx);
++	file->private_data = NULL;
++	return 0;
++}
++
++static const struct file_operations criu_restore_fops = {
++	.owner = THIS_MODULE,
++	.open = criu_restore_open,
++	.release = criu_restore_release,
++	.unlocked_ioctl = criu_restore_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl = criu_restore_ioctl,
++#endif
++};
++
++static struct miscdevice criu_restore_miscdev = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "criu_restore",
++	.fops = &criu_restore_fops,
++	.mode = 0600,
++};
++
++static int __init criu_restore_init(void)
++{
++	return misc_register(&criu_restore_miscdev);
++}
++device_initcall(criu_restore_init);
