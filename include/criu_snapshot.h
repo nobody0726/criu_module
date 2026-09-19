@@ -40,8 +40,11 @@ typedef __u64 uint64_t;
 #define CRIU_SNAPSHOT_SOCKET_QUEUE_VERSION 1U
 #define CRIU_SNAPSHOT_HEADER_FLAGS 0U
 #define CRIU_SNAPSHOT_F_SIGNAL_TIMERS (1U << 0)
-#define CRIU_SNAPSHOT_HEADER_KNOWN_FLAGS CRIU_SNAPSHOT_F_SIGNAL_TIMERS
+#define CRIU_SNAPSHOT_F_PSTREE (1U << 1)
+#define CRIU_SNAPSHOT_HEADER_KNOWN_FLAGS \
+	(CRIU_SNAPSHOT_F_SIGNAL_TIMERS | CRIU_SNAPSHOT_F_PSTREE)
 #define CRIU_SNAPSHOT_TLV_FLAGS 0U
+#define CRIU_SNAPSHOT_TLV_F_PROCESS_SCOPE (1U << 0)
 #define CRIU_SNAPSHOT_FOOTER_FLAGS 0U
 
 #define CRIU_SNAPSHOT_SIGACTION_VERSION 1U
@@ -59,6 +62,15 @@ typedef __u64 uint64_t;
 #define CRIU_SNAPSHOT_ITIMER_HEADER_SIZE 16U
 #define CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE 56U
 #define CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE 16U
+#define CRIU_SNAPSHOT_PSTREE_VERSION 1U
+#define CRIU_SNAPSHOT_PSTREE_RECORD_SIZE 48U
+#define CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE 8U
+
+#define CRIU_SNAPSHOT_PSTREE_F_ROOT (1U << 0)
+#define CRIU_SNAPSHOT_PSTREE_F_EXTERNAL_PARENT (1U << 1)
+#define CRIU_SNAPSHOT_PSTREE_F_SESSION_LEADER (1U << 2)
+#define CRIU_SNAPSHOT_PSTREE_F_PGRP_LEADER (1U << 3)
+#define CRIU_SNAPSHOT_PSTREE_NAMESPACE_CURRENT 1U
 
 #define CRIU_SNAPSHOT_SIGNAL_SCOPE_SHARED 1U
 #define CRIU_SNAPSHOT_SIGNAL_SCOPE_PRIVATE 2U
@@ -92,6 +104,7 @@ enum criu_snapshot_record_type {
 	CRIU_SNAPSHOT_REC_SIGNAL_QUEUE = 16,
 	CRIU_SNAPSHOT_REC_ITIMERS = 17,
 	CRIU_SNAPSHOT_REC_POSIX_TIMERS = 18,
+	CRIU_SNAPSHOT_REC_PSTREE = 19,
 	CRIU_SNAPSHOT_REC_END = 0xffff,
 };
 
@@ -293,6 +306,26 @@ struct criu_snapshot_posix_timer_entry {
 	uint64_t remaining_ns;
 } CRIU_SNAPSHOT_PACKED;
 
+struct criu_snapshot_pstree_record {
+	uint32_t version;
+	uint32_t flags;
+	uint32_t pid;
+	uint32_t tgid;
+	uint32_t ppid;
+	uint32_t pgid;
+	uint32_t sid;
+	int32_t born_sid;
+	uint32_t leader_pid;
+	uint32_t thread_count;
+	uint32_t namespace_scope;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
+struct criu_snapshot_process_scope {
+	uint32_t owner_pid;
+	uint32_t reserved;
+} CRIU_SNAPSHOT_PACKED;
+
 #if defined(__cplusplus)
 static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
@@ -310,6 +343,8 @@ static_assert(sizeof(struct criu_snapshot_itimers_header) == CRIU_SNAPSHOT_ITIME
 static_assert(sizeof(struct criu_snapshot_itimer_entry) == CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE, "snapshot itimer entry ABI size");
 static_assert(sizeof(struct criu_snapshot_posix_timers_header) == CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE, "snapshot posix timer header ABI size");
 static_assert(sizeof(struct criu_snapshot_posix_timer_entry) == CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE, "snapshot posix timer entry ABI size");
+static_assert(sizeof(struct criu_snapshot_pstree_record) == CRIU_SNAPSHOT_PSTREE_RECORD_SIZE, "snapshot pstree ABI size");
+static_assert(sizeof(struct criu_snapshot_process_scope) == CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE, "snapshot process scope ABI size");
 #else
 _Static_assert(sizeof(struct criu_snapshot_header) == CRIU_SNAPSHOT_HEADER_SIZE, "snapshot header ABI size");
 _Static_assert(sizeof(struct criu_snapshot_tlv) == CRIU_SNAPSHOT_TLV_HEADER_SIZE, "snapshot TLV ABI size");
@@ -327,6 +362,8 @@ _Static_assert(sizeof(struct criu_snapshot_itimers_header) == CRIU_SNAPSHOT_ITIM
 _Static_assert(sizeof(struct criu_snapshot_itimer_entry) == CRIU_SNAPSHOT_ITIMER_ENTRY_SIZE, "snapshot itimer entry ABI size");
 _Static_assert(sizeof(struct criu_snapshot_posix_timers_header) == CRIU_SNAPSHOT_POSIX_TIMER_HEADER_SIZE, "snapshot posix timer header ABI size");
 _Static_assert(sizeof(struct criu_snapshot_posix_timer_entry) == CRIU_SNAPSHOT_POSIX_TIMER_ENTRY_SIZE, "snapshot posix timer entry ABI size");
+_Static_assert(sizeof(struct criu_snapshot_pstree_record) == CRIU_SNAPSHOT_PSTREE_RECORD_SIZE, "snapshot pstree ABI size");
+_Static_assert(sizeof(struct criu_snapshot_process_scope) == CRIU_SNAPSHOT_PROCESS_SCOPE_SIZE, "snapshot process scope ABI size");
 #endif
 
 /* Checksum covers header with checksum field zeroed followed by all TLVs; footer is excluded. */

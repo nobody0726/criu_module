@@ -113,8 +113,19 @@ static int validate_files_scope(struct task_struct *task, struct files_struct *f
 	return ret;
 }
 
+static int validate_files_scope_count(struct files_struct *files,
+				      unsigned int frozen_owners)
+{
+	if (!files || !frozen_owners)
+		return -EINVAL;
+	if (atomic_read(&files->count) != frozen_owners + 1)
+		return -EOPNOTSUPP;
+	return 0;
+}
+
 static int walk_fds_prepared(struct task_struct *task, criu_fd_fn prepare,
-			    criu_fd_fn fn, void *arg)
+			    criu_fd_fn fn, void *arg,
+			    unsigned int frozen_owners)
 {
 	struct files_struct *files;
 	struct fdtable *fdt;
@@ -133,7 +144,9 @@ static int walk_fds_prepared(struct task_struct *task, criu_fd_fn prepare,
 	if (!files)
 		return -ESRCH;
 	if (prepare) {
-		ret = validate_files_scope(task, files);
+		ret = frozen_owners ?
+			validate_files_scope_count(files, frozen_owners) :
+			validate_files_scope(task, files);
 		if (ret)
 			goto out_files;
 	}
@@ -197,7 +210,7 @@ out_files:
 
 int criu_walk_fds(struct task_struct *task, criu_fd_fn fn, void *arg)
 {
-	return walk_fds_prepared(task, NULL, fn, arg);
+	return walk_fds_prepared(task, NULL, fn, arg, 0);
 }
 
 struct dump_fd_ctx {
@@ -456,8 +469,9 @@ static int map_one_fd(unsigned int fd, struct file *file,
 	return criu_objmap_get(ctx->objects, key, NULL) ? 0 : -ENOMEM;
 }
 
-int criu_dump_files(struct task_struct *task,
-			struct criu_snapshot_writer *writer)
+static int criu_dump_files_common(struct task_struct *task,
+			struct criu_snapshot_writer *writer,
+			unsigned int frozen_owners)
 {
 	struct criu_fs_record fs;
 	struct path cwd, root;
@@ -478,7 +492,8 @@ int criu_dump_files(struct task_struct *task,
 		ret = -ENOMEM;
 		goto out;
 	}
-	ret = walk_fds_prepared(task, map_one_fd, dump_one_fd, &fd_ctx);
+	ret = walk_fds_prepared(task, map_one_fd, dump_one_fd, &fd_ctx,
+				frozen_owners);
 	if (ret)
 		goto out;
 
@@ -498,4 +513,41 @@ out:
 	criu_objmap_free(fd_ctx.emitted);
 	criu_objmap_free(objects);
 	return ret;
+}
+
+int criu_dump_files(struct task_struct *task,
+			struct criu_snapshot_writer *writer)
+{
+	return criu_dump_files_common(task, writer, 0);
+}
+
+int criu_dump_files_process(struct criu_freeze_ctx *ctx,
+			    unsigned int process_index,
+			    const struct criu_freeze_process_view *view,
+			    struct criu_snapshot_writer *writer)
+{
+	unsigned int task_count;
+	unsigned int i;
+	int ret;
+
+	if (!ctx || !view || !writer)
+		return -EINVAL;
+	ret = criu_freeze_process_task_count(ctx, process_index, &task_count);
+	if (ret)
+		return ret;
+	for (i = 0; i < task_count; i++) {
+		struct criu_freeze_task_view task_view;
+
+		ret = criu_freeze_process_task_get(ctx, process_index, i,
+						   &task_view);
+		if (ret)
+			return ret;
+		task_lock(task_view.task);
+		if (task_view.task->files != view->leader->files)
+			ret = -EOPNOTSUPP;
+		task_unlock(task_view.task);
+		if (ret)
+			return ret;
+	}
+	return criu_dump_files_common(view->leader, writer, task_count);
 }

@@ -151,8 +151,10 @@ static int copy_actions(struct task_struct *task,
 	return 0;
 }
 
-int criu_collect_signals(struct criu_freeze_ctx *ctx,
-			 struct criu_signal_capture *capture)
+static int collect_signals_for_process(struct criu_freeze_ctx *ctx,
+				       unsigned int process_index,
+				       bool process_scoped,
+				       struct criu_signal_capture *capture)
 {
 	struct criu_freeze_task_view view;
 	unsigned int task_count, i;
@@ -162,7 +164,9 @@ int criu_collect_signals(struct criu_freeze_ctx *ctx,
 		return -EINVAL;
 	BUILD_BUG_ON(sizeof(siginfo_t) != CRIU_SNAPSHOT_SIGINFO_SIZE);
 	memset(capture, 0, sizeof(*capture));
-	ret = criu_freeze_task_count(ctx, &task_count);
+	ret = process_scoped ?
+		criu_freeze_process_task_count(ctx, process_index, &task_count) :
+		criu_freeze_task_count(ctx, &task_count);
 	if (ret || !task_count)
 		return ret ? ret : -ESRCH;
 	capture->queue_count = task_count + 1;
@@ -170,7 +174,9 @@ int criu_collect_signals(struct criu_freeze_ctx *ctx,
 				 sizeof(*capture->queues), GFP_KERNEL);
 	if (!capture->queues)
 		return -ENOMEM;
-	ret = criu_freeze_task_get(ctx, 0, &view);
+	ret = process_scoped ?
+		criu_freeze_process_task_get(ctx, process_index, 0, &view) :
+		criu_freeze_task_get(ctx, 0, &view);
 	if (ret)
 		goto fail;
 	ret = copy_actions(view.task, capture->actions);
@@ -184,7 +190,9 @@ int criu_collect_signals(struct criu_freeze_ctx *ctx,
 	for (i = 0; i < task_count; i++) {
 		struct criu_signal_queue_chunk *chunk = &capture->queues[i + 1];
 
-		ret = criu_freeze_task_get(ctx, i, &view);
+		ret = process_scoped ?
+			criu_freeze_process_task_get(ctx, process_index, i, &view) :
+			criu_freeze_task_get(ctx, i, &view);
 		if (ret)
 			goto fail;
 		chunk->scope = CRIU_SNAPSHOT_SIGNAL_SCOPE_PRIVATE;
@@ -206,14 +214,18 @@ int criu_collect_signals(struct criu_freeze_ctx *ctx,
 			}
 		}
 	}
-	ret = criu_freeze_task_get(ctx, 0, &view);
+	ret = process_scoped ?
+		criu_freeze_process_task_get(ctx, process_index, 0, &view) :
+		criu_freeze_task_get(ctx, 0, &view);
 	if (ret)
 		goto fail;
 	ret = copy_queue(view.task, &capture->queues[0]);
 	if (ret)
 		goto fail;
 	for (i = 0; i < task_count; i++) {
-		ret = criu_freeze_task_get(ctx, i, &view);
+		ret = process_scoped ?
+			criu_freeze_process_task_get(ctx, process_index, i, &view) :
+			criu_freeze_task_get(ctx, i, &view);
 		if (ret)
 			goto fail;
 		ret = copy_queue(view.task, &capture->queues[i + 1]);
@@ -235,6 +247,19 @@ int criu_collect_signals(struct criu_freeze_ctx *ctx,
 fail:
 	criu_release_signals(capture);
 	return ret;
+}
+
+int criu_collect_signals(struct criu_freeze_ctx *ctx,
+			 struct criu_signal_capture *capture)
+{
+	return collect_signals_for_process(ctx, 0, false, capture);
+}
+
+int criu_collect_process_signals(struct criu_freeze_ctx *ctx,
+				 unsigned int process_index,
+				 struct criu_signal_capture *capture)
+{
+	return collect_signals_for_process(ctx, process_index, true, capture);
 }
 
 int criu_emit_signals(const struct criu_signal_capture *capture,
