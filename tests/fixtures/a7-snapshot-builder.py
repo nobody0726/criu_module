@@ -19,6 +19,7 @@ REGS = 4
 FD = 5
 FS = 6
 CREDS = 7
+PAGE = 9
 THREAD = 10
 SIGACTION = 15
 SIGNAL_QUEUE = 16
@@ -72,7 +73,8 @@ def full_process_records(pid, ppid):
     regs = bytes(336)
     mm = struct.pack("<2I12Q2I", pid, pid, *([0] * 12), 1, 0)
     vma = struct.pack("<3Q5I6Q512s", 0x400000, 0x401000, 0, 5, 0, 0, 2, 0,
-                      0, 0, 1, 0, 0, 0, fixed_path("[heap]"))
+                      0, 0, 1, 1, 0, 0, fixed_path("[heap]"))
+    page = struct.pack("<Q4I", 0x400000, 1, 4096, 1, 4096) + bytes([pid & 0xff]) * 4096
     fd = struct.pack("<2I5Q512s", 0, 0o20666, 0, 0, 1, 20, 0,
                      fixed_path("/dev/null"))
     fs = fixed_path("/tmp") + fixed_path("/")
@@ -93,6 +95,7 @@ def full_process_records(pid, ppid):
         scoped(pid, REGS, struct.pack("<I", len(regs)) + regs + struct.pack("<Q", 0)),
         scoped(pid, MM, mm),
         scoped(pid, VMA, vma),
+        scoped(pid, PAGE, page),
         scoped(pid, FD, fd),
         scoped(pid, FS, fs),
         scoped(pid, CREDS, creds),

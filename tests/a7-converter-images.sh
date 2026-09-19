@@ -38,4 +38,73 @@ for file in \
 	test -s "$tmp/images/$file"
 done
 test -e "$tmp/images/pages-1.img"
+test -e "$tmp/images/pages-2.img"
+python3 - "$tmp/images" <<'PY'
+import pathlib
+import struct
+import sys
+
+d = pathlib.Path(sys.argv[1])
+
+def varint(blob, off):
+    value = 0
+    shift = 0
+    while True:
+        byte = blob[off]
+        off += 1
+        value |= (byte & 0x7f) << shift
+        if byte < 0x80:
+            return value, off
+        shift += 7
+
+def messages(path):
+    blob = (d / path).read_bytes()
+    off = 8
+    out = []
+    while off < len(blob):
+        size = struct.unpack_from('<I', blob, off)[0]
+        off += 4
+        out.append(blob[off:off + size])
+        off += size
+    assert off == len(blob), path
+    return out
+
+def fields(message):
+    out = {}
+    off = 0
+    while off < len(message):
+        tag, off = varint(message, off)
+        number, wire = tag >> 3, tag & 7
+        if wire == 0:
+            value, off = varint(message, off)
+        elif wire == 2:
+            size, off = varint(message, off)
+            value = message[off:off + size]
+            off += size
+        else:
+            raise AssertionError((number, wire))
+        out.setdefault(number, []).append(value)
+    return out
+
+pm100 = [fields(m) for m in messages('pagemap-100.img')]
+pm101 = [fields(m) for m in messages('pagemap-101.img')]
+assert pm100[0][1][0] == 1, pm100
+assert pm101[0][1][0] == 2, pm101
+assert pm100[1][2][0] == 1, pm100
+assert pm101[1][2][0] == 1, pm101
+pages1 = (d / 'pages-1.img').read_bytes()
+pages2 = (d / 'pages-2.img').read_bytes()
+assert len(pages1) == 4096, len(pages1)
+assert len(pages2) == 4096, len(pages2)
+assert pages1 == bytes([100]) * 4096
+assert pages2 == bytes([101]) * 4096
+
+for pid in (100, 101):
+    core = fields(messages(f'core-{pid}.img')[0])
+    ids = fields(core[4][0])
+    assert ids[1][0] == pid, ids
+    assert ids[2][0] == pid, ids
+    assert ids[3][0] == pid, ids
+    assert ids[4][0] == pid, ids
+PY
 echo 'A7_CONVERTER_IMAGES: PASS'

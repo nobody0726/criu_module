@@ -1656,18 +1656,19 @@ static int build_x86_thread_info(const struct blob_ref *regs,
 	return ret;
 }
 
-static int build_ids(struct image_writer *message)
+static int build_ids(struct image_writer *message, uint32_t id)
 {
-	return image_writer_field_varint(message, 1, 1) ||
-		image_writer_field_varint(message, 2, 1) ||
-		image_writer_field_varint(message, 3, 1) ||
-		image_writer_field_varint(message, 4, 1);
+	return image_writer_field_varint(message, 1, id) ||
+		image_writer_field_varint(message, 2, id) ||
+		image_writer_field_varint(message, 3, id) ||
+		image_writer_field_varint(message, 4, id);
 }
 
 static int build_core(const struct snapshot_model *model,
 				const struct blob_ref *regs,
 				const struct blob_ref *thread_record,
 				bool leader,
+				uint32_t ids_id,
 				const char comm[TASK_COMM_SIZE],
 				struct image_writer *message)
 {
@@ -1709,7 +1710,7 @@ static int build_core(const struct snapshot_model *model,
 		if (!ret)
 			ret = add_nested(message, 3, &tc);
 		if (!ret)
-			ret = build_ids(&ids);
+			ret = build_ids(&ids, ids_id);
 		if (!ret)
 			ret = add_nested(message, 4, &ids);
 	}
@@ -2394,7 +2395,8 @@ static int build_fs(const struct file_table *files, struct image_writer *message
 static int build_page_messages(const struct snapshot_model *model,
 				       struct image_writer **messages_out,
 				       size_t *count_out, uint8_t **raw_out,
-				       size_t *raw_len_out)
+				       size_t *raw_len_out,
+				       uint32_t pages_id)
 {
 	struct image_writer *messages;
 	uint8_t *raw = NULL;
@@ -2411,7 +2413,7 @@ static int build_page_messages(const struct snapshot_model *model,
 		return -1;
 	for (i = 0; i < count; i++)
 		image_writer_init(&messages[i]);
-	if (image_writer_field_varint(&messages[0], 1, 1))
+	if (image_writer_field_varint(&messages[0], 1, pages_id))
 		goto error;
 	count = 1;
 	for (i = 0; i < model->pages.count; i++) {
@@ -2441,7 +2443,7 @@ static int build_page_messages(const struct snapshot_model *model,
 		memcpy(raw + raw_len, page + PAGE_RECORD_SIZE, payload);
 		raw_len += payload;
 		if (image_writer_field_varint(&messages[count], 1, u64(page)) ||
-			image_writer_field_varint(&messages[count], 2, 0) ||
+			image_writer_field_varint(&messages[count], 2, u32(page + 8)) ||
 			image_writer_field_varint(&messages[count], 4, PE_PRESENT) ||
 			image_writer_field_varint(&messages[count], 5, u32(page + 8)))
 			goto error;
@@ -2591,36 +2593,6 @@ static int append_message(struct image_writer **items, size_t *count,
 	return 0;
 }
 
-static int append_raw(uint8_t **data, size_t *len, size_t *capacity,
-		      const uint8_t *payload, size_t payload_len)
-{
-	uint8_t *new_data;
-	size_t new_capacity;
-
-	if (!payload_len)
-		return 0;
-	if (*len > SIZE_MAX - payload_len)
-		return -1;
-	if (*len + payload_len > *capacity) {
-		new_capacity = *capacity ? *capacity * 2U : 4096U;
-		while (new_capacity < *len + payload_len) {
-			if (new_capacity > SIZE_MAX / 2U) {
-				new_capacity = *len + payload_len;
-				break;
-			}
-			new_capacity *= 2U;
-		}
-		new_data = realloc(*data, new_capacity);
-		if (!new_data)
-			return -1;
-		*data = new_data;
-		*capacity = new_capacity;
-	}
-	memcpy(*data + *len, payload, payload_len);
-	*len += payload_len;
-	return 0;
-}
-
 static int emit_a7_image_directory(const struct snapshot_model *model,
 				   const struct criu_convert_options *options)
 {
@@ -2629,8 +2601,6 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 	struct image_writer *reg_messages = NULL;
 	size_t file_count = 0, file_capacity = 0;
 	size_t reg_count = 0, reg_capacity = 0;
-	uint8_t *page_data = NULL;
-	size_t page_data_len = 0, page_data_capacity = 0;
 	char name[64];
 	size_t i, j;
 	int ret = SNAPSHOT_READER_IO_ERROR;
@@ -2672,6 +2642,7 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 		uint8_t *process_page_data = NULL;
 		size_t fd_count = 0, page_count = 0, process_page_len = 0;
 		uint32_t id_offset;
+		uint32_t pages_id;
 		char comm[TASK_COMM_SIZE];
 
 		model_view_for_process(model, process, &view);
@@ -2691,6 +2662,7 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 
 			message.len = 0;
 			if (build_core(&view, &view.regs, thread, tid == process->pid,
+				       process->pid,
 				       comm, &message)) {
 				file_table_free(&files);
 				goto out_message;
@@ -2714,16 +2686,26 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 			goto out_message;
 		}
 		message.len = 0;
+		if (i + 1 > UINT32_MAX)
+			goto out_message;
+		pages_id = (uint32_t)(i + 1);
 		if (build_page_messages(&view, &page_messages, &page_count,
-					&process_page_data, &process_page_len)) {
+					&process_page_data, &process_page_len,
+					pages_id)) {
 			file_table_free(&files);
 			goto out_message;
 		}
 		snprintf(name, sizeof(name), "pagemap-%u.img", process->pid);
 		if (emit_messages(options->output_dir, name, PAGEMAP_MAGIC,
-				  page_messages, page_count, false) ||
-		    append_raw(&page_data, &page_data_len, &page_data_capacity,
-			       process_page_data, process_page_len)) {
+				  page_messages, page_count, false)) {
+			free_messages(page_messages, page_count);
+			free(process_page_data);
+			file_table_free(&files);
+			goto out_message;
+		}
+		snprintf(name, sizeof(name), "pages-%u.img", pages_id);
+		if (emit_raw(options->output_dir, name, process_page_data,
+			     process_page_len)) {
 			free_messages(page_messages, page_count);
 			free(process_page_data);
 			file_table_free(&files);
@@ -2782,7 +2764,7 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 		}
 		free_messages(fd_messages, files.binding_count);
 		message.len = 0;
-		if (build_ids(&message)) {
+		if (build_ids(&message, process->pid)) {
 			file_table_free(&files);
 			goto out_message;
 		}
@@ -2819,9 +2801,7 @@ static int emit_a7_image_directory(const struct snapshot_model *model,
 	if (emit_messages(options->output_dir, "files.img", FILES_MAGIC,
 			  file_messages, file_count, false) ||
 	    emit_messages(options->output_dir, "reg-files.img", REG_FILES_MAGIC,
-			  reg_messages, reg_count, false) ||
-	    emit_raw(options->output_dir, "pages-1.img", page_data,
-		     page_data_len))
+			  reg_messages, reg_count, false))
 		goto out_message;
 	ret = 0;
 
@@ -2829,7 +2809,6 @@ out_message:
 	image_writer_free(&message);
 	free_messages(file_messages, file_count);
 	free_messages(reg_messages, reg_count);
-	free(page_data);
 	return ret;
 }
 
@@ -2958,7 +2937,7 @@ static int emit_image_directory(const struct snapshot_document *doc,
 
 			message.len = 0;
 			if (build_core(&model, &model.regs, thread,
-				       tid == model.pid, comm, &message)) {
+				       tid == model.pid, 1, comm, &message)) {
 				fprintf(stderr, "converter: build_core tid=%u failed\n", tid);
 				ret = SNAPSHOT_READER_IO_ERROR;
 				goto out_message;
@@ -2973,7 +2952,7 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		}
 	} else {
 		message.len = 0;
-		if (build_core(&model, &model.regs, NULL, true, comm, &message)) {
+		if (build_core(&model, &model.regs, NULL, true, 1, comm, &message)) {
 			fprintf(stderr, "converter: build_core failed\n");
 			ret = SNAPSHOT_READER_IO_ERROR;
 			goto out_message;
@@ -2999,7 +2978,7 @@ static int emit_image_directory(const struct snapshot_document *doc,
 	}
 	message.len = 0;
 	if (build_page_messages(&model, &page_messages, &page_count, &page_data,
-			&page_data_len)) {
+			&page_data_len, 1)) {
 		fprintf(stderr, "converter: build_page_messages failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
@@ -3141,7 +3120,7 @@ static int emit_image_directory(const struct snapshot_document *doc,
 		goto out_message;
 	}
 	message.len = 0;
-	if (build_ids(&message)) {
+	if (build_ids(&message, 1)) {
 		fprintf(stderr, "converter: build ids failed\n");
 		ret = SNAPSHOT_READER_IO_ERROR;
 		goto out_message;
