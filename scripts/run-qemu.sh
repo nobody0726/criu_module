@@ -31,6 +31,10 @@ if [ "$(uname -s)" = Linux ] && [ -f "$QEMU_PROJECT_DIR/userspace/Makefile" ]; t
 	# same path looked like an ELF during the Lima build.
 	make -C "$QEMU_PROJECT_DIR/userspace" clean all >/dev/null
 fi
+if [ "$(uname -s)" = Linux ] &&
+   [ -f "$QEMU_PROJECT_DIR/userspace/mini-restore/Makefile" ]; then
+	make -C "$QEMU_PROJECT_DIR/userspace/mini-restore" clean all >/dev/null
+fi
 if [ "$(uname -s)" = Linux ] && [ -f "$QEMU_PROJECT_DIR/tests/progs/Makefile" ]; then
 	# The guest gates execute test fixtures from /mnt/host/tests/progs.
 	# Build them in the same Lima-local staging tree that is passed to QEMU
