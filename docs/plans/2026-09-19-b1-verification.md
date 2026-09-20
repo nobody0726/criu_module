@@ -57,6 +57,15 @@ Additional parser evidence:
 - Clean guest `dmesg` after a successful restore.
 - Live-kernel-only negatives: target PID occupied and duplicate COMMIT.
 
+## Guest environment blocker
+
+The Lima `criu-dev` guest was reached before the final gate attempt, but its root ext4
+filesystem had an aborted journal and was repeatedly remounted read-only. This made both
+`/tmp` and `/home/yhome.guest` unwritable; the worktree build failed before compilation with
+`Cannot create temporary file in /tmp/: Read-only file system`. A stop/start did not restore
+SSH, so the instance was force-stopped without deleting its disk. No guest PASS/FAIL result is
+inferred from this incident.
+
 ## Required next work
 
 1. Complete file-backed VMA identity reopening and unsupported-page handling for the parsed
