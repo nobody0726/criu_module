@@ -160,7 +160,12 @@ static enum b1_restore_status b1_stage_page_runs(const struct b1_restore_image *
 				close(fd);
 				return staging_format(diag, "page run outside VMA");
 			}
-			got = pread(fd, dst, B1_RESTORE_PAGE_SIZE, (off_t)page_offset);
+			if (run->image_offset > (uint64_t)INT64_MAX - page_offset) {
+				close(fd);
+				return staging_format(diag, "page image offset overflow");
+			}
+			got = pread(fd, dst, B1_RESTORE_PAGE_SIZE,
+				    (off_t)(run->image_offset + page_offset));
 			if (got != (ssize_t)B1_RESTORE_PAGE_SIZE) {
 				close(fd);
 				return staging_io(diag, "reading page image");

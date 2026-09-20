@@ -113,7 +113,7 @@ A9，最后用 A10 做完整集成验证。B1/B2 只有 A10 通过后才启动�
 
 | 步骤 | 名称 | 工期 | 产出 | 文件 |
 |---|---|---|---|---|
-| **B1** | 单进程 restore(用户空间解析/staging + 内核 VMA 提交 + `rt_sigreturn`) | 2-3 周 | **进行中**：本地合同已通过；阻塞于真实 CRIU protobuf reader + guest PASS | [B1 设计](superpowers/specs/2026-09-19-b1-kernel-assisted-restore-design.md)、[B1 步骤](steps/B1-mini-restore.md)、[验证记录](plans/2026-09-19-b1-verification.md) |
+| **B1** | 单进程 restore(用户空间解析/staging + 内核 VMA 提交 + `rt_sigreturn`) | 2-3 周 | **进行中**：本地合同与真实 CRIU wire reader 已通过；阻塞于 patched-kernel guest PASS | [B1 设计](superpowers/specs/2026-09-19-b1-kernel-assisted-restore-design.md)、[B1 步骤](steps/B1-mini-restore.md)、[验证记录](plans/2026-09-19-b1-verification.md) |
 | **B2** | 进程树 restore(两趟 fork + session/pgid) | 2-3 周 | 能恢复多进程树 | [B2](steps/B2-pstree-restore.md) |
 
 B 轨暂缓，待 A10 通过后再启动。

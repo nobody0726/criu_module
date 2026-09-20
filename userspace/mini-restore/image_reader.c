@@ -1,10 +1,13 @@
 #include "image_reader.h"
+#include "criu_image_reader.h"
 
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 struct kv_file {
 	char **keys;
@@ -363,7 +366,26 @@ format:
 
 enum b1_restore_status b1_read_images(const char *dir, struct b1_restore_image *image)
 {
+	int fd;
+	uint32_t magic = 0;
 	enum b1_restore_status st;
+
+	{
+		char path[512];
+		ssize_t got;
+
+		snprintf(path, sizeof(path), "%s/inventory.img", dir);
+		fd = open(path, O_RDONLY);
+		if (fd < 0) {
+			b1_restore_set_diag(image, B1_RESTORE_IO,
+					    "missing inventory.img");
+			return B1_RESTORE_IO;
+		}
+		got = read(fd, &magic, sizeof(magic));
+		close(fd);
+		if (got == (ssize_t)sizeof(magic) && magic == 0x58313116U)
+			return b1_read_criu_images(dir, image);
+	}
 
 	st = read_inventory(dir, image);
 	if (st != B1_RESTORE_OK)

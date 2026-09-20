@@ -9,9 +9,10 @@ B1 is **not complete**.
 The local contract layer is implemented and passing, but the authoritative Linux 5.10.29
 guest restore gate has not produced `B1_KERNEL_ASSISTED_RESTORE: PASS`.
 
-Primary blocker: `userspace/mini-restore` currently parses the synthetic B1 manifest fixtures
-used by the contract tests, not real CRIU protobuf image files. Therefore the guest gate cannot
-yet restore a real CRIU dump, and it must not emit a fake PASS marker.
+The first parser blocker is resolved: `userspace/mini-restore` now auto-detects CRIU v1.1
+framing and parses the supported subset of real CRIU protobuf `inventory`, `pstree`, `core`,
+`mm`, and `pagemap` records in userspace. The synthetic manifest path remains for focused
+contract tests. The authoritative guest gate still has not produced a PASS marker.
 
 ## Passing local contracts
 
@@ -29,6 +30,12 @@ yet restore a real CRIU dump, and it must not emit a fake PASS marker.
 - `sh tests/b1-negative.sh`
 - `sh tests/b1-patch-build.sh`
 
+Additional parser evidence:
+
+- real-image wire fixture accepted by `tests/b1-image-reader-contract.sh`;
+- existing CRIU image set under `artifacts/s1/.../img` accepted by `mini-restore --dry-run`
+  with the recorded target PID and VMA/page model.
+
 ## Verified implementation slices
 
 - Restore transaction ABI with VALIDATE-only user VMA pointer and pointer-free COMMIT.
@@ -42,7 +49,7 @@ yet restore a real CRIU dump, and it must not emit a fake PASS marker.
 
 ## Not yet verified
 
-- Real CRIU protobuf image parsing.
+- Full real-image support for file identity reopening and compressed/parent page runs.
 - Linux 5.10.29 guest kernel build of patch 0004 after full application.
 - Live `/dev/criu_restore` VALIDATE/COMMIT ioctl path in the guest.
 - Exact PID restore liveness after COMMIT.
@@ -52,7 +59,8 @@ yet restore a real CRIU dump, and it must not emit a fake PASS marker.
 
 ## Required next work
 
-1. Replace or extend the Task 5 synthetic reader with real CRIU protobuf-c image parsing.
+1. Complete file-backed VMA identity reopening and unsupported-page handling for the parsed
+   real-image model.
 2. Re-run `tests/b1-kernel-assisted-restore.sh` through:
 
    ```sh

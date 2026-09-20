@@ -524,14 +524,17 @@ Current implementation status:
 - B1 kernel-assisted restore has a locked transaction ABI and Linux 5.10.29 patch scaffold.
 - `userspace/mini-restore` now has userspace-only reader/model, validator, carrier, staging,
   sigframe/bootstrap, and cleanup/orchestrator scaffolding.
-- The current reader accepts the B1 synthetic manifest fixtures used by contract tests. It does
-  **not yet parse real CRIU protobuf images**, so the guest gate must not print a false restore
-  PASS marker.
+- The reader now auto-detects CRIU v1.1 image framing and parses the supported subset of real
+  `inventory`, `pstree`, `core`, `mm`, and `pagemap` protobuf records in userspace. The original
+  synthetic manifest reader remains available for focused contract fixtures.
+- Real-image parsing is covered by a wire-format fixture and has been exercised against an
+  existing CRIU image set with `--dry-run`. The full live restore path is still not complete:
+  file identity reopening, bootstrap handoff, patched-kernel build, and the guest PASS gate
+  remain independently required.
 
 The guest gate is `tests/b1-kernel-assisted-restore.sh`. It runs only in the Linux 5.10.29
-QEMU guest and stages all mutable work below guest-local `/tmp`. Until real CRIU protobuf image
-parsing is connected, the gate performs a real CRIU dump and then requires mini-restore to reject
-that image set with a diagnostic.
+QEMU guest and stages all mutable work below guest-local `/tmp`. It must use a real CRIU dump
+as input and must not treat a parser rejection or a zero exit code as restore success.
 
 The only future success marker for the live restore gate remains:
 

@@ -36,6 +36,7 @@ struct b1_vma_record {
 struct b1_page_run {
 	uint64_t addr;
 	uint64_t pages;
+	uint64_t image_offset;
 	char image[64];
 };
 
@@ -44,6 +45,13 @@ struct b1_restore_image {
 	uint32_t target_pid;
 	uint64_t tls;
 	uint64_t sigmask;
+	uint64_t regs[31];
+	uint64_t sp;
+	uint64_t pc;
+	uint64_t pstate;
+	uint8_t vregs[32][16];
+	uint32_t fpsr;
+	uint32_t fpcr;
 	int have_core;
 	int have_mm;
 	int have_pagemap;

@@ -91,11 +91,15 @@ int main(int argc, char **argv)
 	if (st == B1_RESTORE_OK)
 		st = build_validate_plan(&image, &staging, &validate_plan);
 	if (st == B1_RESTORE_OK) {
-		thread.sp = validate_plan.sigframe_final_sp;
-		thread.pc = validate_plan.bootstrap_pc;
-		thread.pstate = 0;
+		memcpy(thread.regs, image.regs, sizeof(thread.regs));
+		thread.sp = image.sp;
+		thread.pc = image.pc;
+		thread.pstate = image.pstate;
 		thread.sigmask = image.sigmask;
 		thread.tls = image.tls;
+		memcpy(thread.vregs, image.vregs, sizeof(thread.vregs));
+		thread.fpsr = image.fpsr;
+		thread.fpcr = image.fpcr;
 		if (b1_sigframe_build(&thread, &sigframe)) {
 			b1_restore_set_diag(&image, B1_RESTORE_FORMAT, "building sigframe");
 			st = B1_RESTORE_FORMAT;
