@@ -103,8 +103,10 @@ static enum b1_restore_status b1_fill_restore_vmas(const struct b1_restore_image
 		plan->restore_vmas[i].staging_start = staging_start;
 		plan->restore_vmas[i].target_start = image->vmas[i].start;
 		plan->restore_vmas[i].length = image->vmas[i].length;
-		plan->restore_vmas[i].prot = PROT_READ | PROT_WRITE;
-		plan->restore_vmas[i].map_flags = MAP_PRIVATE;
+		plan->restore_vmas[i].prot = image->vmas[i].prot ?
+			image->vmas[i].prot : (PROT_READ | PROT_WRITE);
+		plan->restore_vmas[i].map_flags = image->vmas[i].map_flags ?
+			image->vmas[i].map_flags : MAP_PRIVATE;
 		plan->restore_vmas[i].kind = b1_restore_kind(image->vmas[i].kind);
 		if (image->vmas[i].kind == B1_VMA_STACK)
 			plan->restore_vmas[i].flags |= CRIU_RESTORE_VMA_F_GROWSDOWN;

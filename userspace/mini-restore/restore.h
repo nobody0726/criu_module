@@ -25,6 +25,10 @@ enum b1_vma_kind {
 struct b1_vma_record {
 	uint64_t start;
 	uint64_t length;
+	uint64_t pgoff;
+	uint64_t shmid;
+	uint32_t prot;
+	uint32_t map_flags;
 	enum b1_vma_kind kind;
 	int shared;
 	int dirty_file_private;

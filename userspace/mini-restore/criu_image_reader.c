@@ -409,7 +409,9 @@ static enum b1_restore_status parse_core(const char *path,
 
 static enum b1_restore_status append_vma(struct b1_restore_image *image,
 					 uint64_t start, uint64_t end,
-					 uint32_t flags, uint32_t status)
+					 uint32_t prot, uint32_t flags,
+					 uint32_t status, uint64_t pgoff,
+					 uint64_t shmid)
 {
 	struct b1_vma_record *new_vmas;
 	struct b1_vma_record *vma;
@@ -425,6 +427,10 @@ static enum b1_restore_status append_vma(struct b1_restore_image *image,
 	memset(vma, 0, sizeof(*vma));
 	vma->start = start;
 	vma->length = end - start;
+	vma->pgoff = pgoff;
+	vma->shmid = shmid;
+	vma->prot = prot;
+	vma->map_flags = flags;
 	vma->shared = (flags & MAP_SHARED_FLAG) != 0 ||
 		      (status & (VMA_FILE_SHARED | VMA_ANON_SHARED)) != 0;
 	vma->dirty_file_private = 0;
@@ -472,7 +478,8 @@ static enum b1_restore_status parse_mm(const char *path,
 		if (field.number == 14) {
 			struct b1_pb_cursor vcursor;
 			uint64_t start = 0, end = 0;
-			uint32_t flags = 0, status = 0;
+			uint64_t pgoff = 0, shmid = 0;
+			uint32_t prot = 0, flags = 0, status = 0;
 			int have_start = 0, have_end = 0;
 			struct b1_pb_field vf;
 			int vrc;
@@ -486,6 +493,16 @@ static enum b1_restore_status parse_mm(const char *path,
 					have_start = 1;
 				else if (vf.number == 2 && !b1_pb_read_u64(&vf, &end))
 					have_end = 1;
+				else if (vf.number == 3 && b1_pb_read_u64(&vf, &pgoff)) {
+					free(blob.data);
+					return real_format(image, "invalid CRIU VMA offset");
+				} else if (vf.number == 4 && b1_pb_read_u64(&vf, &shmid)) {
+					free(blob.data);
+					return real_format(image, "invalid CRIU VMA file id");
+				} else if (vf.number == 5 && b1_pb_read_u32(&vf, &prot)) {
+					free(blob.data);
+					return real_format(image, "invalid CRIU VMA protection");
+				}
 				else if (vf.number == 6 && b1_pb_read_u32(&vf, &flags)) {
 					free(blob.data);
 					return real_format(image, "invalid CRIU VMA flags");
@@ -498,7 +515,8 @@ static enum b1_restore_status parse_mm(const char *path,
 				free(blob.data);
 				return real_format(image, "incomplete CRIU VMA message");
 			}
-			st = append_vma(image, start, end, flags, status);
+			st = append_vma(image, start, end, prot, flags, status,
+					pgoff, shmid);
 			if (st != B1_RESTORE_OK) {
 				free(blob.data);
 				return st;

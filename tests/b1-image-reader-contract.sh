@@ -32,6 +32,9 @@ int main(int argc, char **argv)
 	       (unsigned long long)image.sp,
 	       (unsigned long long)image.pc,
 	       (unsigned long long)image.tls);
+	if (image.vma_count)
+		printf("vma0-prot=%u flags=%u\n", image.vmas[0].prot,
+		       image.vmas[0].map_flags);
 	b1_restore_image_free(&image);
 	return st == B1_RESTORE_OK ? 0 : 1;
 }
@@ -79,6 +82,7 @@ python3 "$real_builder" valid "$tmp/real-valid"
 grep -Fq 'OK:' "$tmp/real-valid.out"
 grep -Fq 'regs0=0 sp=274877939712 pc=274877907200 tls=343597383680' \
 	"$tmp/real-valid.out"
+grep -Fq 'vma0-prot=3 flags=34' "$tmp/real-valid.out"
 
 for case in real-missing-core real-wrong-arch real-shared-mapping \
 	real-compressed-pages; do
