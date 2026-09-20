@@ -29,6 +29,7 @@ contract tests. The authoritative guest gate still has not produced a PASS marke
 - `sh tests/b1-cleanup-contract.sh`
 - `sh tests/b1-negative.sh`
 - `sh tests/b1-patch-build.sh`
+- `sh tests/b1-qemu-staging-contract.sh`
 
 Additional parser evidence:
 

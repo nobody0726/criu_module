@@ -151,6 +151,9 @@
 - Tests: `sh -n tests/b1-kernel-assisted-restore.sh`; `sh -n tests/b1-guest-helpers.sh`; `sh tests/b1-cleanup-contract.sh`; `sh tests/b1-image-reader-contract.sh`; `make -C tests/progs clean b1-minimal LDFLAGS=`; `git diff --check`.
 - A3/A8 ruling: do not emit `B1_KERNEL_ASSISTED_RESTORE: PASS` until the Linux 5.10.29 guest verifies exact PID liveness, tick growth, markers/TLS/maps, and clean dmesg.
 - Task 10: incomplete; continue with real CRIU protobuf reader/live guest validation before marking complete.
+- Follow-up commit: `5e749fc test: rebuild mini-restore in QEMU staging tree`.
+- `scripts/run-qemu.sh` now rebuilds `userspace/mini-restore` inside the Linux staging
+  directory, preventing a host Mach-O binary from being passed into the guest.
 
 ## Task 11
 
