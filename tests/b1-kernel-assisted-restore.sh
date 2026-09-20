@@ -53,11 +53,19 @@ wait "$PID" 2>/dev/null || true
 PID=0
 [ ! -d "/proc/$reported" ] || b1_fail "original PID still live after kill"
 
-if "$RESTORE" --images "$IMAGES" --dry-run >"$B1_TMP/restore.log" 2>&1; then
-	b1_fail "mini-restore unexpectedly accepted real CRIU protobuf images before protobuf reader is implemented"
+"$RESTORE" --images "$IMAGES" --dry-run >"$B1_TMP/dry-run.log" 2>&1 ||
+	b1_fail "real CRIU image parser rejected its own dump"
+grep -Fq 'B1_RESTORE: DRY_RUN_OK' "$B1_TMP/dry-run.log" ||
+	b1_fail "dry-run lacked the real-image success marker"
+
+if "$RESTORE" --images "$IMAGES" >"$B1_TMP/restore.log" 2>&1; then
+	b1_fail "mini-restore returned success without a verified restored PID"
+fi
+if grep -Fq 'open /dev/criu_restore' "$B1_TMP/restore.log"; then
+	b1_skip "patched /dev/criu_restore is not available in this guest"
 fi
 grep -E 'FORMAT|IO|UNSUPPORTED' "$B1_TMP/restore.log" >/dev/null ||
-	b1_fail "mini-restore failure lacked diagnostic"
+	b1_fail "live restore failure lacked diagnostic"
 
 b1_dmesg_check "$DMESG_MARK"
-b1_skip "real CRIU protobuf reader/live restore not connected yet; Task 10 gate scaffold is present"
+b1_fail "live restore is not complete; inspect restore.log"

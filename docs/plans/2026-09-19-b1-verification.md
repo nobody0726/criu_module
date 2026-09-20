@@ -36,6 +36,9 @@ Additional parser evidence:
 - real-image wire fixture accepted by `tests/b1-image-reader-contract.sh`;
 - existing CRIU image set under `artifacts/s1/.../img` accepted by `mini-restore --dry-run`
   with the recorded target PID and VMA/page model.
+- `tests/b1-kernel-assisted-restore.sh` now treats real-image `--dry-run` acceptance as a
+  prerequisite and separately reports missing `/dev/criu_restore`; it no longer expects the
+  real protobuf image to be rejected.
 
 ## Verified implementation slices
 

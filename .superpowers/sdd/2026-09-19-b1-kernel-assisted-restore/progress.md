@@ -154,6 +154,9 @@
 - Follow-up commit: `5e749fc test: rebuild mini-restore in QEMU staging tree`.
 - `scripts/run-qemu.sh` now rebuilds `userspace/mini-restore` inside the Linux staging
   directory, preventing a host Mach-O binary from being passed into the guest.
+- The guest gate was corrected to require real-image `--dry-run` success and to distinguish
+  a missing `/dev/criu_restore` from an actual live-restore failure; it no longer encodes the
+  obsolete “protobuf reader must reject real images” scaffold expectation.
 
 ## Task 11
 
