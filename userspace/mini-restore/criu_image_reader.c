@@ -843,7 +843,7 @@ static enum b1_restore_status parse_pagemap(const char *path,
 }
 
 static int find_named_image(const char *dir, const char *prefix,
-			    struct b1_real_paths *paths)
+			    uint32_t desired_pid, struct b1_real_paths *paths)
 {
 	DIR *dp;
 	struct dirent *entry;
@@ -866,6 +866,10 @@ static int find_named_image(const char *dir, const char *prefix,
 		pid = strtoul(suffix, &end, 10);
 		if (end == suffix || strcmp(end, ".img") != 0 || pid > UINT32_MAX)
 			continue;
+		if (desired_pid && pid != desired_pid)
+			continue;
+		if (paths->pid && pid != paths->pid)
+			continue;
 		if (!paths->pid)
 			paths->pid = (uint32_t)pid;
 		if (strcmp(prefix, "core-") == 0)
@@ -879,8 +883,8 @@ static int find_named_image(const char *dir, const char *prefix,
 	return 0;
 }
 
-enum b1_restore_status b1_read_criu_images(const char *dir,
-					   struct b1_restore_image *image)
+enum b1_restore_status b1_read_criu_images_for_pid(
+	const char *dir, uint32_t desired_pid, struct b1_restore_image *image)
 {
 	struct b1_real_paths paths;
 	char path[PATH_MAX];
@@ -893,11 +897,20 @@ enum b1_restore_status b1_read_criu_images(const char *dir,
 	st = parse_pstree(dir, image);
 	if (st != B1_RESTORE_OK)
 		return st;
-	if (find_named_image(dir, "core-", &paths) ||
-	    find_named_image(dir, "mm-", &paths) ||
-	    find_named_image(dir, "pagemap-", &paths) ||
+	if (find_named_image(dir, "core-", desired_pid, &paths) ||
+	    find_named_image(dir, "mm-", desired_pid, &paths) ||
+	    find_named_image(dir, "pagemap-", desired_pid, &paths) ||
 	    !paths.core[0] || !paths.mm[0] || !paths.pagemap[0])
 		return real_io(image, "missing CRIU task image");
+	/*
+	 * pstree.img is a closure-wide image.  parse_pstree() records its
+	 * first (root) entry, which is useful for the single-process API but
+	 * must not be reused as the identity of every per-task image.  For a
+	 * tree restore the selected core-/mm-/pagemap- filenames are the
+	 * authoritative task identity, so carry the requested PID forward.
+	 */
+	if (desired_pid)
+		image->target_pid = desired_pid;
 	snprintf(path, sizeof(path), "%s/%s", dir, paths.core);
 	st = parse_core(path, image);
 	if (st != B1_RESTORE_OK)
@@ -953,4 +966,10 @@ enum b1_restore_status b1_read_criu_images(const char *dir,
 	image->namespaces = 0;
 	b1_restore_set_diag(image, B1_RESTORE_OK, "real CRIU protobuf image loaded");
 	return B1_RESTORE_OK;
+}
+
+enum b1_restore_status b1_read_criu_images(const char *dir,
+					   struct b1_restore_image *image)
+{
+	return b1_read_criu_images_for_pid(dir, 0, image);
 }

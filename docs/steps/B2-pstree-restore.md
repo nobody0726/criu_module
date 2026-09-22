@@ -1,5 +1,51 @@
 # B2 —— 用户态 restore:进程树
 
+## 当前实现状态（2026-09-23）
+
+已完成并提交到 B2 worktree 的核心代码：
+
+- 真实 CRIU `pstree.img` 读取、单线程/独立 `mm` 拓扑校验和 `born_sid` 推导；
+- 可复用的 B1 单任务 prepare/VALIDATE/COMMIT API；
+- 共享 `MAP_SHARED` scratch、PID registry、futex/轮询超时、abort 唤醒；
+- 两趟递归 carrier 构造、session/pgid 恢复、ready barrier 和逐 PID 清理；
+- `mini-restore --pstree DIR [--restore-sibling]` 主流程；
+- B1 回归、拓扑、pgid barrier、负向和 cleanup 本地契约。
+
+本地验证已通过：
+
+```text
+B1_NEGATIVE: PASS
+B1_CLEANUP_CONTRACT: PASS
+B1_TASK_RESTORE_CONTRACT: PASS
+B2_PSTREE_CONTRACT: PASS
+B2_SHARED_CONTRACT: PASS
+B2_PROCESS_TREE_CONSTRUCTION: PASS
+B2_PGID_BARRIER: PASS
+B2_NEGATIVE: PASS
+```
+
+Linux 5.10.29/aarch64 QEMU 的真实 CRIU tree gate 已取得：
+
+```text
+B2_PROCESS_TREE_RESTORE: PASS root=126 child=130
+```
+
+验证命令从 Lima `criu-dev` 进入，再由 `scripts/run-qemu.sh` 启动 nested
+QEMU；dump、镜像、restore 和日志均位于 guest-local 临时目录。门禁比较了
+root/child 的 `/proc/$pid/stat` 中 PPID、PGID、SID，并确认恢复后的两个 PID
+保持存活，同时检查 gate 起始后的 dmesg 没有 Oops、BUG、WARNING、KASAN、
+refcount、use-after-free 或 `criu_restore` 错误。
+
+本次还修复了两个兼容性问题：CRIU tree fixture 禁用 glibc rseq（Linux
+5.10.29 没有 `PTRACE_GET_RSEQ_CONFIGURATION`），以及 B1 bootstrap 对
+`target_stop` 的 ABI 兼容处理（`x2==0` 表示无 stop flag，非零值仍按地址读取）。
+
+门禁当前不验证 signal handler、fd/socket、共享内存、namespace、cgroup、
+mount/fs context；这些仍属于 B2 扩展或后续轨道。
+
+详细证据和下一次 guest gate 命令见
+[`2026-09-22-b2-verification.md`](../plans/2026-09-22-b2-verification.md)。
+
 **工期:** 2-3 周 · **前置:** B1 · **产出:** 多进程 + session/pgid 的恢复
 
 > 相关原理:[06-pid-and-session](../principles/06-pid-and-session.md)、

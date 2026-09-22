@@ -24,7 +24,7 @@ python3 "$builder" valid "$tmp/valid"
 grep -Fq 'B1_RESTORE: DRY_RUN_OK' "$tmp/valid.out"
 
 cleanup_c="$root_dir/userspace/mini-restore/cleanup.c"
-main_c="$root_dir/userspace/mini-restore/main.c"
+task_restore_c="$root_dir/userspace/mini-restore/task_restore.c"
 
 grep -Fq 'b1_cleanup_record_pid' "$cleanup_c"
 grep -Fq 'b1_cleanup_run' "$cleanup_c"
@@ -43,7 +43,7 @@ for token in \
 	'b1_sigframe_build' \
 	'b1_cleanup_run'
 do
-	grep -Fq "$token" "$main_c"
+	grep -Fq "$token" "$task_restore_c"
 done
 
 if grep -Fq 'kill(0' "$cleanup_c" || grep -Fq 'killpg' "$cleanup_c"; then

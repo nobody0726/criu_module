@@ -372,6 +372,12 @@ format:
 
 enum b1_restore_status b1_read_images(const char *dir, struct b1_restore_image *image)
 {
+	return b1_read_images_for_pid(dir, 0, image);
+}
+
+enum b1_restore_status b1_read_images_for_pid(const char *dir, pid_t pid,
+					      struct b1_restore_image *image)
+{
 	int fd;
 	uint32_t magic = 0;
 	enum b1_restore_status st;
@@ -390,7 +396,8 @@ enum b1_restore_status b1_read_images(const char *dir, struct b1_restore_image *
 		got = read(fd, &magic, sizeof(magic));
 		close(fd);
 		if (got == (ssize_t)sizeof(magic) && magic == 0x58313116U)
-			return b1_read_criu_images(dir, image);
+			return b1_read_criu_images_for_pid(dir, (uint32_t)pid,
+						   image);
 	}
 
 	st = read_inventory(dir, image);
