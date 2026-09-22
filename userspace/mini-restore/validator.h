@@ -4,5 +4,7 @@
 #include "restore.h"
 
 enum b1_restore_status b1_validate_supported(struct b1_restore_image *image);
+enum b1_restore_status b1_validate_task_supported(
+	struct b1_restore_image *image);
 
 #endif

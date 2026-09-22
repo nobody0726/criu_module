@@ -107,7 +107,7 @@ enum b1_restore_status rst_validate_pstree(const struct rst_pstree *tree,
 					    struct b1_restore_image *diag);
 ```
 
-- [ ] **Step 1: Write the failing parser contract.** Build a minimal CRIU-framed `pstree.img` fixture containing a root, two children, and one grandchild with distinct `sid`/`pgid` values. Assert the parser returns the exact node count, parent indexes, `born_sid`, and root.
+- [ ] **Step 1: Write the failing parser contract.** Build a minimal CRIU-framed `pstree.img` fixture containing only the real `pstree.proto` fields (`pid`, `ppid`, `pgid`, `sid`, and one `threads` entry) for a root, two children, and one grandchild with distinct `sid`/`pgid` values. Assert the parser derives the exact `born_sid`, parent indexes, and root; the fixture must not add a non-existent `born_sid` protobuf field.
 - [ ] **Step 2: Run the contract to verify it fails.**
 
 Run:
@@ -118,8 +118,8 @@ sh tests/b2-pstree-contract.sh
 
 Expected: FAIL because `rst_read_pstree()` and the B2 object files do not exist.
 
-- [ ] **Step 3: Implement framing and protobuf field extraction.** Reuse the existing CRIU wire/framing helpers in `criu_image_reader.c`; parse only the `pstree_entry` fields required for `pid`, `ppid`, `pgid`, `sid`, `born_sid`, and child relationships. Do not add a second protobuf decoder.
-- [ ] **Step 4: Implement topology validation.** Reject duplicate PIDs, missing non-root parents, cycles, multiple roots, `threads > 1`, shared-mm markers, unsupported namespace markers, missing required session/pgid leaders, and inconsistent `born_sid`.
+- [ ] **Step 3: Implement framing and protobuf field extraction.** Reuse the existing CRIU wire/framing helpers in `criu_image_reader.c`; parse only the real `pstree_entry` fields `pid`, `ppid`, `pgid`, `sid`, and repeated `threads`. Do not add a second protobuf decoder or expect a `born_sid` field.
+- [ ] **Step 4: Implement topology validation and `born_sid` derivation.** Reject duplicate PIDs, missing non-root parents, cycles, multiple roots, `threads` arrays with anything other than one leader, shared-mm markers, unsupported namespace markers, missing required session/pgid leaders, and conflicting ancestor-derived `born_sid` values. Use the CRIU `prepare_pstree_ids()` rule: for each non-leader task whose parent has a different session, walk ancestors until the target session leader and mark each traversed ancestor with that session.
 - [ ] **Step 5: Add the static `tree-session` fixture.** Emit stable markers containing name, PID, PPID, PGID, SID, and a tick counter. Keep the fixture single-threaded and use only private anonymous mappings.
 - [ ] **Step 6: Run the contract to verify it passes.**
 

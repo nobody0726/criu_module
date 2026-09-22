@@ -20,8 +20,25 @@ static void marker(int signo)
 
 static void stay(void)
 {
+	/*
+	 * Keep the checkpoint point in user space.  The B1 bootstrap contract
+	 * also requires the restored stack marker at sp+8 and x2 == 0; encode
+	 * both directly in the loop so B2 exercises tree/session ordering on
+	 * top of the already-validated B1 handoff.
+	 */
+#if defined(__aarch64__)
+	__asm__ volatile(
+		"sub sp, sp, #32\n"
+		"mov x0, #0x5a7e\n"
+		"movk x0, #0xb100, lsl #16\n"
+		"str x0, [sp, #8]\n"
+		"mov x2, xzr\n"
+		"1: b 1b\n");
+	__builtin_unreachable();
+#else
 	for (;;)
-		pause();
+		;
+#endif
 }
 
 int main(void)

@@ -189,7 +189,7 @@ target pid -> rst_item -> creation state -> precommit state -> terminal state
 - 每个节点只有一个线程；
 - 不存在 `CLONE_VM`、共享 fd table 或共享资源引用；
 - session leader 和所需 pgid leader 都在 closure 中；
-- `born_sid` 与 `sid`/父节点关系一致；
+	- 从 `sid`、父链和 session leader 推导 `born_sid`，并检查推导过程中没有冲突；
 - session leader 已退出、TASK_HELPER 或无法构造的拓扑明确返回
   `-EOPNOTSUPP`；
 - 每个节点的 B1 镜像都能在不可逆阶段前完成验证。
@@ -218,9 +218,12 @@ target pid -> rst_item -> creation state -> precommit state -> terminal state
 4. 第二遍 fork 其余孩子；
 5. 子任务立即进入自己的递归流程，不返回父任务的 sibling 循环。
 
-第一遍的判定优先使用 A7 记录的 `born_sid`，并以
-`child->sid != child->parent->sid` 作为一致性校验。不能通过“先全部 fork、再
-setsid()”简化，因为这会永久破坏混合 session 拓扑。
+真实 CRIU `pstree.proto` 不携带 `born_sid` 字段。B2 在读完全部节点后，复用 CRIU
+`prepare_pstree_ids()` 的语义推导它：对每个 `sid != pid` 且父节点 session 不同的
+任务，从父节点沿祖先链向上走到对应 session leader；路径上的每个祖先都记录该
+子任务的 session 作为 `born_sid`。同一个祖先如果被推导出两个不同的
+`born_sid`，必须拒绝镜像。不能通过“先全部 fork、再 setsid()”简化，因为这会永久
+破坏混合 session 拓扑。
 
 ### 6.4 pgid 恢复
 

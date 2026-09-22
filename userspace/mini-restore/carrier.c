@@ -149,12 +149,10 @@ static enum b1_restore_status clone_errno_status(int err,
 }
 #endif
 
-enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *manager,
-						  pid_t target_pid,
-						  uint64_t tls,
-						  b1_carrier_entry_fn entry,
-						  void *arg,
-						  struct b1_restore_image *diag)
+enum b1_restore_status b1_create_exact_pid_carrier_flags(
+	struct b1_carrier_manager *manager, pid_t target_pid, uint64_t tls,
+	unsigned flags, b1_carrier_entry_fn entry, void *arg,
+	struct b1_restore_image *diag)
 {
 #if defined(__linux__) && defined(SYS_clone3)
 	void *stack = NULL;
@@ -167,11 +165,15 @@ enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *ma
 #endif
 	};
 	struct clone_args args = {
-		.flags = CLONE_SETTLS,
+		/* normal B1 carriers use .flags = CLONE_SETTLS; tree coordinators
+		 * defer TLS installation until bootstrap after libc work is done. */
+		.flags = ((flags & B1_CARRIER_F_KEEP_PARENT_TLS) ? 0 :
+			  CLONE_SETTLS) |
+			((flags & B1_CARRIER_F_CLONE_PARENT) ? CLONE_PARENT : 0),
 		.exit_signal = SIGCHLD,
 		.stack = 0,
 		.stack_size = 0,
-		.tls = tls,
+		.tls = (flags & B1_CARRIER_F_KEEP_PARENT_TLS) ? 0 : tls,
 		.set_tid = (unsigned long)&target_pid,
 		.set_tid_size = 1,
 	};
@@ -188,6 +190,13 @@ enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *ma
 	}
 	args.stack = (unsigned long)stack;
 	args.stack_size = B1_CARRIER_STACK_SIZE;
+	/*
+	 * Linux rejects CLONE_PARENT together with a non-zero exit signal in
+	 * clone3().  A sibling restore has no waitable parent here, so let
+	 * the kernel reparent it on exit; ordinary carriers retain SIGCHLD.
+	 */
+	if (flags & B1_CARRIER_F_CLONE_PARENT)
+		args.exit_signal = 0;
 
 	rc = syscall(SYS_clone3, &args, sizeof(args));
 	if (rc < 0) {
@@ -216,10 +225,19 @@ enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *ma
 	(void)manager;
 	(void)target_pid;
 	(void)tls;
+	(void)flags;
 	(void)entry;
 	(void)arg;
 	b1_restore_set_diag(diag, B1_RESTORE_UNSUPPORTED,
 			    "clone3 set_tid is only available on Linux");
 	return B1_RESTORE_UNSUPPORTED;
 #endif
+}
+
+enum b1_restore_status b1_create_exact_pid_carrier(
+	struct b1_carrier_manager *manager, pid_t target_pid, uint64_t tls,
+	b1_carrier_entry_fn entry, void *arg, struct b1_restore_image *diag)
+{
+	return b1_create_exact_pid_carrier_flags(manager, target_pid, tls, 0,
+						 entry, arg, diag);
 }

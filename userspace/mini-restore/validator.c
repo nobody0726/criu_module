@@ -110,3 +110,26 @@ enum b1_restore_status b1_validate_supported(struct b1_restore_image *image)
 	b1_restore_set_diag(image, B1_RESTORE_OK, "supported");
 	return B1_RESTORE_OK;
 }
+
+enum b1_restore_status b1_validate_task_supported(
+	struct b1_restore_image *image)
+{
+	int tasks;
+	int threads;
+	int children;
+	enum b1_restore_status st;
+
+	if (!image)
+		return B1_RESTORE_FORMAT;
+	tasks = image->tasks;
+	threads = image->threads;
+	children = image->children;
+	image->tasks = 1;
+	image->threads = 1;
+	image->children = 0;
+	st = b1_validate_supported(image);
+	image->tasks = tasks;
+	image->threads = threads;
+	image->children = children;
+	return st;
+}
