@@ -70,8 +70,10 @@ b1_restore_bootstrap_entry:
 	mov x2, #3
 	mov x8, #64
 	svc #0
+	cbz x27, .Ltarget_stop_ok
 	ldr w1, [x27]
 	cbnz w1, .Ltarget_stop_failed
+.Ltarget_stop_ok:
 	mov x0, #2
 	adr x1, .Ltarget_after
 	mov x2, #3
