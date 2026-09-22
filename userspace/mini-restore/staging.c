@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "staging.h"
 
 #include <errno.h>
@@ -9,7 +11,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#ifndef MAP_ANONYMOUS
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
@@ -135,6 +137,37 @@ static void *b1_staging_addr_for_page(const struct b1_restore_image *image,
 	return NULL;
 }
 
+enum b1_restore_status b1_staging_copy(struct b1_staging_plan *plan,
+				       uint64_t staging_addr,
+				       const void *data, size_t length)
+{
+	size_t page = b1_host_page_size();
+	size_t i;
+
+	if (!plan || !data || !length)
+		return B1_RESTORE_FORMAT;
+	for (i = 0; i < plan->vma_count; i++) {
+		uint64_t start = plan->restore_vmas[i].staging_start;
+		uint64_t end = start + plan->restore_vmas[i].length;
+		uint64_t copy_end = staging_addr + length;
+		uintptr_t map_start;
+		size_t map_len;
+
+		if (staging_addr < start || copy_end < staging_addr || copy_end > end)
+			continue;
+		map_start = (uintptr_t)(staging_addr & ~((uint64_t)page - 1U));
+		map_len = (size_t)(copy_end - map_start);
+		map_len = b1_round_up_size(map_len, page);
+		if (mprotect((void *)map_start, map_len, PROT_READ | PROT_WRITE) < 0)
+			return B1_RESTORE_IO;
+		memcpy((void *)(uintptr_t)staging_addr, data, length);
+		if (mprotect((void *)map_start, map_len, PROT_READ) < 0)
+			return B1_RESTORE_IO;
+		return B1_RESTORE_OK;
+	}
+	return B1_RESTORE_FORMAT;
+}
+
 static enum b1_restore_status b1_stage_page_runs(const struct b1_restore_image *image,
 						 const char *image_dir,
 						 const struct b1_staging_plan *plan,
@@ -218,7 +251,8 @@ enum b1_restore_status b1_stage_image(const struct b1_restore_image *image,
 			void *mapped = mmap(addr, image->vmas[i].length,
 					    PROT_READ | PROT_WRITE,
 					    MAP_PRIVATE | MAP_FIXED,
-					    image->vmas[i].backing_fd, 0);
+					    image->vmas[i].backing_fd,
+					    (off_t)image->vmas[i].pgoff);
 			if (mapped != addr)
 				return staging_io(diag, "mapping clean file-private VMA");
 		}
@@ -233,6 +267,9 @@ enum b1_restore_status b1_stage_image(const struct b1_restore_image *image,
 
 		if (mprotect(addr, image->vmas[i].length, PROT_READ) < 0)
 			return staging_io(diag, "protecting staging VMA");
+		if (image->vmas[i].prot & PROT_EXEC)
+			__builtin___clear_cache((char *)addr,
+					(char *)addr + image->vmas[i].length);
 	}
 	return B1_RESTORE_OK;
 }

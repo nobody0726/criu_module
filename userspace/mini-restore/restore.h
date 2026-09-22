@@ -37,6 +37,13 @@ struct b1_vma_record {
 	uint64_t file_size;
 };
 
+struct b1_reg_file {
+	uint32_t id;
+	char *name;
+	uint64_t size;
+	int have_size;
+};
+
 struct b1_page_run {
 	uint64_t addr;
 	uint64_t pages;
@@ -72,6 +79,8 @@ struct b1_restore_image {
 	int gcs;
 	size_t vma_count;
 	struct b1_vma_record *vmas;
+	size_t reg_file_count;
+	struct b1_reg_file *reg_files;
 	size_t page_run_count;
 	struct b1_page_run *page_runs;
 };

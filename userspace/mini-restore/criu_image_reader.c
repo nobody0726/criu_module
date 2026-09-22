@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "criu_image_reader.h"
 
 #include "criu_wire.h"
@@ -21,6 +23,8 @@
 #define CORE_MAGIC 0x55053847U
 #define MM_MAGIC 0x57492820U
 #define PAGEMAP_MAGIC 0x56084025U
+#define FILES_MAGIC 0x56303138U
+#define REG_FILES_MAGIC 0x50363636U
 
 #define VMA_AREA_STACK (1U << 1)
 #define VMA_AREA_VDSO (1U << 3)
@@ -34,6 +38,7 @@
 #define VMA_AREA_SHSTK (1U << 15)
 
 #define MAP_SHARED_FLAG 0x01U
+#define MAP_GROWSDOWN_FLAG 0x100U
 #define PAGEMAP_HAS_BLOCKS 6U
 
 struct b1_blob {
@@ -437,7 +442,7 @@ static enum b1_restore_status append_vma(struct b1_restore_image *image,
 	vma->file_stable = 1;
 	vma->backing_fd = -1;
 	vma->file_size = vma->length;
-	if (status & VMA_AREA_STACK)
+	if ((status & VMA_AREA_STACK) || (flags & MAP_GROWSDOWN_FLAG))
 		vma->kind = B1_VMA_STACK;
 	else if (status & VMA_AREA_VDSO)
 		vma->kind = B1_VMA_VDSO;
@@ -493,22 +498,31 @@ static enum b1_restore_status parse_mm(const char *path,
 					have_start = 1;
 				else if (vf.number == 2 && !b1_pb_read_u64(&vf, &end))
 					have_end = 1;
-				else if (vf.number == 3 && b1_pb_read_u64(&vf, &pgoff)) {
-					free(blob.data);
-					return real_format(image, "invalid CRIU VMA offset");
-				} else if (vf.number == 4 && b1_pb_read_u64(&vf, &shmid)) {
-					free(blob.data);
-					return real_format(image, "invalid CRIU VMA file id");
-				} else if (vf.number == 5 && b1_pb_read_u32(&vf, &prot)) {
-					free(blob.data);
-					return real_format(image, "invalid CRIU VMA protection");
-				}
-				else if (vf.number == 6 && b1_pb_read_u32(&vf, &flags)) {
-					free(blob.data);
-					return real_format(image, "invalid CRIU VMA flags");
-				} else if (vf.number == 7 && b1_pb_read_u32(&vf, &status)) {
-					free(blob.data);
-					return real_format(image, "invalid CRIU VMA status");
+				else if (vf.number == 3) {
+					if (b1_pb_read_u64(&vf, &pgoff)) {
+						free(blob.data);
+						return real_format(image, "invalid CRIU VMA offset");
+					}
+				} else if (vf.number == 4) {
+					if (b1_pb_read_u64(&vf, &shmid)) {
+						free(blob.data);
+						return real_format(image, "invalid CRIU VMA file id");
+					}
+				} else if (vf.number == 5) {
+					if (b1_pb_read_u32(&vf, &prot)) {
+						free(blob.data);
+						return real_format(image, "invalid CRIU VMA protection");
+					}
+				} else if (vf.number == 6) {
+					if (b1_pb_read_u32(&vf, &flags)) {
+						free(blob.data);
+						return real_format(image, "invalid CRIU VMA flags");
+					}
+				} else if (vf.number == 7) {
+					if (b1_pb_read_u32(&vf, &status)) {
+						free(blob.data);
+						return real_format(image, "invalid CRIU VMA status");
+					}
 				}
 			}
 			if (vrc < 0 || !have_start || !have_end) {
@@ -531,6 +545,187 @@ static enum b1_restore_status parse_mm(const char *path,
 		real_format(image, "CRIU mm contains no VMAs");
 }
 
+static enum b1_restore_status parse_reg_files(const char *path,
+					      const char *dir,
+					      struct b1_restore_image *image)
+{
+	struct b1_blob blob;
+	const uint8_t *payload;
+	size_t payload_len, off;
+	int rc;
+
+	if (access(path, R_OK) < 0)
+		return real_io(image, "missing CRIU reg-files image");
+	if (read_blob(path, &blob, image) != B1_RESTORE_OK)
+		return image->diagnostic[0] ? B1_RESTORE_IO : B1_RESTORE_IO;
+	if (framed_header(&blob, REG_FILES_MAGIC, 0, &off)) {
+		free(blob.data);
+		return real_format(image, "invalid CRIU reg-files framing");
+	}
+	while ((rc = next_record(&blob, &off, &payload, &payload_len)) > 0) {
+		struct b1_pb_cursor cursor = { payload, payload_len, 0 };
+		struct b1_pb_field field;
+		struct b1_reg_file *entry;
+		uint64_t id = 0, size = 0;
+		const char *name = NULL;
+		size_t name_len = 0;
+		int have_id = 0;
+
+		while (b1_pb_next(&cursor, &field) > 0) {
+			if (field.number == 1 && !b1_pb_read_u64(&field, &id))
+				have_id = id <= UINT32_MAX;
+			else if (field.number == 6 &&
+				 field.wire_type == 2) {
+				name = (const char *)field.bytes;
+				name_len = field.length;
+			} else if (field.number == 8) {
+				if (b1_pb_read_u64(&field, &size))
+					break;
+			}
+		}
+		if (!have_id || !name || !name_len || name_len >= PATH_MAX) {
+			free(blob.data);
+			return real_format(image, "invalid CRIU reg-file record");
+		}
+		entry = realloc(image->reg_files,
+				(image->reg_file_count + 1U) * sizeof(*entry));
+		if (!entry) {
+			free(blob.data);
+			return real_io(image, "allocating CRIU reg-file model");
+		}
+		image->reg_files = entry;
+		entry = &image->reg_files[image->reg_file_count++];
+		memset(entry, 0, sizeof(*entry));
+		entry->id = (uint32_t)id;
+		entry->name = malloc(name_len + 1U);
+		if (!entry->name) {
+			free(blob.data);
+			return real_io(image, "allocating CRIU reg-file path");
+		}
+		memcpy(entry->name, name, name_len);
+		entry->name[name_len] = '\0';
+		entry->size = size;
+		entry->have_size = size != 0;
+		(void)dir;
+	}
+	free(blob.data);
+	if (rc < 0)
+		return real_format(image, "invalid CRIU reg-files stream");
+	return B1_RESTORE_OK;
+}
+
+static enum b1_restore_status append_reg_file(struct b1_restore_image *image,
+					      uint64_t id, const uint8_t *name,
+					      size_t name_len, uint64_t size,
+					      int have_size)
+{
+	struct b1_reg_file *entry;
+
+	if (id > UINT32_MAX || !name || !name_len || name_len >= PATH_MAX)
+		return real_format(image, "invalid CRIU reg-file record");
+	entry = realloc(image->reg_files,
+			(image->reg_file_count + 1U) * sizeof(*entry));
+	if (!entry)
+		return real_io(image, "allocating CRIU reg-file model");
+	image->reg_files = entry;
+	entry = &image->reg_files[image->reg_file_count++];
+	memset(entry, 0, sizeof(*entry));
+	entry->id = (uint32_t)id;
+	entry->name = malloc(name_len + 1U);
+	if (!entry->name)
+		return real_io(image, "allocating CRIU reg-file path");
+	memcpy(entry->name, name, name_len);
+	entry->name[name_len] = '\0';
+	entry->size = size;
+	entry->have_size = have_size;
+	return B1_RESTORE_OK;
+}
+
+static enum b1_restore_status parse_files(const char *path,
+					  struct b1_restore_image *image)
+{
+	struct b1_blob blob;
+	const uint8_t *payload;
+	size_t payload_len, off;
+	int rc;
+	enum b1_restore_status st;
+
+	st = read_blob(path, &blob, image);
+	if (st != B1_RESTORE_OK)
+		return st;
+	if (framed_header(&blob, FILES_MAGIC, 0, &off)) {
+		free(blob.data);
+		return real_format(image, "invalid CRIU files framing");
+	}
+	while ((rc = next_record(&blob, &off, &payload, &payload_len)) > 0) {
+		struct b1_pb_cursor cursor = { payload, payload_len, 0 };
+		struct b1_pb_field field;
+		uint64_t type = 0, id = 0;
+		const uint8_t *reg_payload = NULL;
+		size_t reg_len = 0;
+		int have_type = 0, have_id = 0;
+		int frc;
+
+		while ((frc = b1_pb_next(&cursor, &field)) > 0) {
+			if (field.number == 1) {
+				if (b1_pb_read_u64(&field, &type))
+					break;
+				have_type = 1;
+			} else if (field.number == 2) {
+				if (b1_pb_read_u64(&field, &id))
+					break;
+				have_id = 1;
+			} else if (field.number == 3 && field.wire_type == 2) {
+				reg_payload = field.bytes;
+				reg_len = field.length;
+			}
+		}
+		if (frc < 0 || !have_type || !have_id)
+			break;
+		/* fd_types.REG is 1; other file kinds have different nested data. */
+		if (type != 1 || !reg_payload)
+			continue;
+		{
+			struct b1_pb_cursor reg_cursor = { reg_payload, reg_len, 0 };
+			struct b1_pb_field reg_field;
+			const uint8_t *name = NULL;
+			size_t name_len = 0;
+			uint64_t reg_id = id, size = 0;
+			int have_size = 0;
+			int rrc;
+
+			while ((rrc = b1_pb_next(&reg_cursor, &reg_field)) > 0) {
+				if (reg_field.number == 1 &&
+				    b1_pb_read_u64(&reg_field, &reg_id))
+					break;
+				if (reg_field.number == 6 && reg_field.wire_type == 2) {
+					name = reg_field.bytes;
+					name_len = reg_field.length;
+				}
+				if (reg_field.number == 8) {
+					if (b1_pb_read_u64(&reg_field, &size))
+						break;
+					have_size = 1;
+				}
+			}
+			if (rrc < 0 || !name || !name_len) {
+				free(blob.data);
+				return real_format(image, "invalid CRIU embedded reg-file record");
+			}
+			st = append_reg_file(image, reg_id, name, name_len, size,
+					     have_size);
+			if (st != B1_RESTORE_OK) {
+				free(blob.data);
+				return st;
+			}
+		}
+	}
+	free(blob.data);
+	if (rc < 0)
+		return real_format(image, "invalid CRIU files stream");
+	return B1_RESTORE_OK;
+}
+
 static enum b1_restore_status append_page_run(struct b1_restore_image *image,
 					      uint64_t addr, uint64_t pages,
 					      uint64_t image_offset,
@@ -550,9 +745,10 @@ static enum b1_restore_status append_page_run(struct b1_restore_image *image,
 	image->page_runs[image->page_run_count].addr = addr;
 	image->page_runs[image->page_run_count].pages = pages;
 	image->page_runs[image->page_run_count].image_offset = image_offset;
-	snprintf(image->page_runs[image->page_run_count].image,
-		 sizeof(image->page_runs[image->page_run_count].image), "%s",
-		 pages_name);
+	if (strlen(pages_name) >= sizeof(image->page_runs[image->page_run_count].image))
+		return real_format(image, "CRIU pages filename too long");
+	memcpy(image->page_runs[image->page_run_count].image, pages_name,
+	       strlen(pages_name) + 1U);
 	image->page_run_count++;
 	return B1_RESTORE_OK;
 }
@@ -714,6 +910,43 @@ enum b1_restore_status b1_read_criu_images(const char *dir,
 	st = parse_pagemap(path, dir, image);
 	if (st != B1_RESTORE_OK)
 		return st;
+	snprintf(path, sizeof(path), "%s/files.img", dir);
+	if (access(path, R_OK) == 0) {
+		st = parse_files(path, image);
+		if (st != B1_RESTORE_OK)
+			return st;
+	} else {
+		snprintf(path, sizeof(path), "%s/reg-files.img", dir);
+		if (access(path, R_OK) == 0) {
+			st = parse_reg_files(path, dir, image);
+			if (st != B1_RESTORE_OK)
+				return st;
+		}
+	}
+	for (size_t i = 0; i < image->vma_count; i++) {
+		for (size_t j = 0; j < image->reg_file_count; j++) {
+			struct b1_reg_file *file = &image->reg_files[j];
+			if (image->vmas[i].kind == B1_VMA_FILE_PRIVATE &&
+			    image->vmas[i].shmid == file->id) {
+				struct stat stbuf;
+				int fd;
+
+				fd = open(file->name, O_RDONLY | O_CLOEXEC);
+				if (fd < 0 || fstat(fd, &stbuf) < 0 ||
+				    (file->have_size && (uint64_t)stbuf.st_size < file->size)) {
+					if (fd >= 0)
+						close(fd);
+					return real_io(image, "opening CRIU file-private backing file");
+				}
+				image->vmas[i].backing_fd = fd;
+				image->vmas[i].file_size = (uint64_t)stbuf.st_size;
+				break;
+			}
+		}
+		if (image->vmas[i].kind == B1_VMA_FILE_PRIVATE &&
+		    image->vmas[i].backing_fd < 0)
+			return real_unsupported(image, "file-private VMA has no reg-file backing");
+	}
 	image->shared_mm = 0;
 	image->shared_mappings = 0;
 	image->vdso_reloc = 0;

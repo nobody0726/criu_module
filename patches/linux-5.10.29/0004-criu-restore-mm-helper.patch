@@ -580,6 +580,9 @@
 +
 +	tx->state = RESTORE_TX_COMMITTING;
 +	ret = criu_restore_commit_vmas(&tx->plan, tx->vmas);
++	if (ret)
++		pr_err("criu_restore: commit pid=%u failed ret=%d\\n",
++		       tx->plan.target_pid, ret);
 +	if (!ret)
 +		tx->state = RESTORE_TX_COMMITTED;
 +out:

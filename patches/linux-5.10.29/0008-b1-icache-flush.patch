@@ -1,0 +1,22 @@
+--- a/kernel/criu_restore.c
++++ b/kernel/criu_restore.c
+@@ -21,4 +21,5 @@
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+ #include <linux/uaccess.h>
++#include <asm/cacheflush.h>
+ #include <uapi/linux/criu_restore.h>
+@@ -370,4 +370,12 @@
+ static int criu_restore_restore_prot(const struct criu_restore_vma_v1 *vma)
+ {
+-	return criu_restore_mprotect(vma->target_start, vma->length, vma->prot);
++	int ret;
++
++	ret = criu_restore_mprotect(vma->target_start, vma->length, vma->prot);
++	if (ret)
++		return ret;
++	if (vma->prot & PROT_EXEC)
++		flush_icache_range(vma->target_start,
++				  vma->target_start + vma->length);
++	return 0;
+ }

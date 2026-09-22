@@ -13,6 +13,7 @@ SERIES="v${VERSION%%.*}.x"
 KROOT="${KROOT:-$HOME/kernels}"
 KDIR="$KROOT/linux-$VERSION"
 JOBS="${JOBS:-$(nproc)}"
+KERNEL_TARGETS="${KERNEL_TARGETS:-Image modules}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mkdir -p "$KROOT"
@@ -144,7 +145,7 @@ disable CONFIG_DEBUG_INFO_BTF
 make -s olddefconfig
 
 echo ">>> Building with $JOBS jobs (first build: 20-40 min)"
-make ARCH=arm64 -j"$JOBS" Image modules
+make ARCH=arm64 -j"$JOBS" $KERNEL_TARGETS
 
 echo ">>> Building initramfs (fallback for run-qemu.sh when virtme-ng is absent)"
 IRD="$KROOT/initramfs-$VERSION"

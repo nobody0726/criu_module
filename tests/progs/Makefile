@@ -6,6 +6,10 @@ PROGRAMS = a1-layout a1-check many-vmas busy-counter multithread-counter threads
 .PHONY: all clean
 all: $(PROGRAMS)
 
+all: b1-carrier-probe
+b1-carrier-probe: b1-carrier-probe.c ../../userspace/mini-restore/libmini_restore.a
+	$(CC) $(CFLAGS) -I../../include $< ../../userspace/mini-restore/libmini_restore.a $(LDFLAGS) -o $@
+
 fds-dup fds-pipe fds-unix-stream fds-unsupported: a5-fixture.h
 shared-fdt shared-file-offset: a5-fixture.h
 a8-cross-fd shm-anon shm-posix shm-sysv: a5-fixture.h

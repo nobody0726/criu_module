@@ -1,7 +1,7 @@
 # B1 内核辅助 restore 设计
 
-**状态：** 设计已确认，实施计划已生成  
-**日期：** 2026-09-19  
+**状态：** 设计已确认，B1 核心实现与 guest gate 已完成
+**日期：** 2026-09-22
 **适用环境：** Lima `criu-dev` 构建，嵌套 Linux 5.10.29/aarch64 QEMU guest 验证
 
 ## 1. 目标与架构决策
@@ -411,10 +411,10 @@ B1_KERNEL_ASSISTED_RESTORE: PASS
 - 不直接使用外置模块无法链接的 `mm_alloc()`、`do_mmap()`、`mremap_to()` 等内部符号；
 - 保留失败证据、清理证据和复现命令，避免只记录“命令返回 0”。
 
-## 11. 后续实施计划的边界
+## 11. 实施状态与后续边界
 
-本文是 B1 的设计合同，不是代码实施计划。正式实施计划必须在本设计确认后另行
-生成，并按以下顺序拆分：
+本文仍是 B1 的设计合同；对应的实施计划和验证记录已完成。核心实现按以下顺序
+落地并通过本地合同测试及 Linux 5.10.29 guest gate：
 
 1. 锁定 UAPI/transaction ABI 与 parser contract；
 2. 实现 Linux 5.10.29 内核 patch 和 misc device；
@@ -424,4 +424,7 @@ B1_KERNEL_ASSISTED_RESTORE: PASS
 6. 在同一 aarch64 guest 完成端到端 gate；
 7. 运行 verification-before-completion 后再决定是否合入 main。
 
-在实施计划生成并获用户批准前，不开始写 B1 代码。
+当前明确的后续范围是扩展资源和多任务 restore：dirty file-private/COW、共享映射、
+vDSO relocation、多线程/进程树、namespace/cgroup/fs、socket、定时器以及
+target-PID occupied/duplicate-COMMIT 的 live-kernel-only 负向场景。它们不属于本次
+B1 核心 PASS，也不能由本文件的核心 gate 结果推断为已支持。

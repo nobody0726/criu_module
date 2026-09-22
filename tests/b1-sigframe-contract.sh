@@ -40,15 +40,18 @@ int main(void)
 		return 3;
 	if (frame.sigmask != state.sigmask)
 		return 4;
-	if (frame.fpsimd.head.magic != B1_FPSIMD_MAGIC ||
-	    frame.fpsimd.head.size != sizeof(frame.fpsimd))
+	if (b1_sigframe_fpsimd(&frame)->head.magic != B1_FPSIMD_MAGIC ||
+	    b1_sigframe_fpsimd(&frame)->head.size !=
+		    sizeof(*b1_sigframe_fpsimd(&frame)))
 		return 5;
-	if (frame.fpsimd.vregs[31][0] != 31 || frame.fpsimd.fpsr != 1 ||
-	    frame.fpsimd.fpcr != 2)
+	if (b1_sigframe_fpsimd(&frame)->vregs[31][0] != 31 ||
+	    b1_sigframe_fpsimd(&frame)->fpsr != 1 ||
+	    b1_sigframe_fpsimd(&frame)->fpcr != 2)
 		return 6;
 	if (state.tls != 0x12345000)
 		return 7;
-	printf("sigframe=%zu fpsimd=%zu\n", sizeof(frame), sizeof(frame.fpsimd));
+	printf("sigframe=%zu fpsimd=%zu\n", sizeof(frame),
+	       sizeof(*b1_sigframe_fpsimd(&frame)));
 	return 0;
 }
 C

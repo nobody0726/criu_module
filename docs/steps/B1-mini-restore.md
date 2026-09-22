@@ -510,40 +510,45 @@ CRIU 当 oracle 这个思路能给出的最大回报。
 
 ## 6. 完成标准
 
-- [ ] 16 个用例通过,含 8、9、16 三个错误路径用例
-- [ ] `rst_clone_with_pid` 之前的断言确认所有镜像已读完
-- [ ] `rst_finalize` 之前无任何可能失败的工作(代码审查逐行确认)
-- [ ] pagemap 偏移换算与 A3 用同一个 `static inline`
-- [ ] premap 区域与目标 VMA 的冲突检查已实现
-- [ ] `ci/zdtm-restore-allowlist.txt` 至少 3 个测试
-- [ ] 已知限制写进本文件附录:vDSO 不重定位、单线程、无 socket
-## 7. 当前实现状态（2026-09-19）
+B1 首个核心 gate 已完成。以下项目是当前实现和验证范围：
+
+- [x] userspace CRIU image parsing/validation 与 kernel `VALIDATE -> COMMIT` 闭环
+- [x] exact-PID carrier、staging、aarch64 bootstrap、TLS 和 `rt_sigreturn`
+- [x] Linux 5.10.29 QEMU guest 中真实 CRIU dump -> mini-restore 的 liveness gate
+- [x] 错误路径和清理契约测试；不支持的格式在 COMMIT 前返回明确诊断
+- [ ] 16 个完整用例、ZDTM restore allowlist 和所有扩展资源恢复
+
+扩展项仍明确限制为后续任务：vDSO relocation、多线程/进程树、socket、namespace/cgroup/fs
+关联资源、dirty file-private/COW 和 live-kernel-only 的 PID 占用/重复 COMMIT 负向场景。
+
+## 7. 当前实现状态（2026-09-22）
 
 Current implementation status:
 
-- B1 kernel-assisted restore has a locked transaction ABI and Linux 5.10.29 patch scaffold.
-- `userspace/mini-restore` now has userspace-only reader/model, validator, carrier, staging,
-  sigframe/bootstrap, and cleanup/orchestrator scaffolding.
+- B1 kernel-assisted restore has a locked transaction ABI and Linux 5.10.29 implementation
+  patches (0004, 0007, 0008).
+- `userspace/mini-restore` has userspace-only reader/model, validator, carrier, staging,
+  sigframe/bootstrap, and cleanup/orchestrator implementations.
 - The reader now auto-detects CRIU v1.1 image framing and parses the supported subset of real
   `inventory`, `pstree`, `core`, `mm`, and `pagemap` protobuf records in userspace. The original
   synthetic manifest reader remains available for focused contract fixtures.
-- Real-image parsing is covered by a wire-format fixture and has been exercised against an
-  existing CRIU image set with `--dry-run`. The full live restore path is still not complete:
-  file identity reopening, bootstrap handoff, patched-kernel build, and the guest PASS gate
-  remain independently required.
+- Real-image parsing is covered by a wire-format fixture and the live path has passed in the
+  Linux 5.10.29 guest. The authoritative result is recorded in
+  `docs/plans/2026-09-19-b1-verification.md`.
 
 The guest gate is `tests/b1-kernel-assisted-restore.sh`. It runs only in the Linux 5.10.29
 QEMU guest and stages all mutable work below guest-local `/tmp`. It must use a real CRIU dump
 as input and must not treat a parser rejection or a zero exit code as restore success.
 
-The only future success marker for the live restore gate remains:
+The core live restore success marker is:
 
 ```text
 B1_KERNEL_ASSISTED_RESTORE: PASS
 ```
 
-Do not emit that marker until exact PID liveness, tick growth, markers/TLS/maps, and clean dmesg
-are all verified in the guest.
+The gate emits this marker only after exact PID liveness, restored mappings, and clean dmesg
+checks. The fixture also exercises the TLS/bootstrap path; broader tick/marker comparisons
+remain part of the extended restore matrix.
 
 ## Task 11 negative/build coverage status
 
@@ -551,8 +556,8 @@ are all verified in the guest.
 vDSO relocation, shared mapping, multi-thread image, child/process-tree image, namespace
 metadata, invalid backing-file identity, overlapping VMAs, and malformed fields. Target PID
 occupied and duplicate COMMIT remain live-kernel-only negative cases and are explicitly deferred
-until the Task 10 guest gate is unblocked.
+to the extended guest matrix.
 
 `tests/b1-patch-build.sh` runs the B1 patch contracts and a dry-run application of patch 0004
-against the pinned Linux 5.10.29 source tree when it is available. Full kernel build and real
-guest restore remain required before B1 can be marked complete.
+against the pinned Linux 5.10.29 source tree when it is available. The real guest restore gate
+has passed; a full ZDTM/extended-resource matrix remains outside this core B1 completion.

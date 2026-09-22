@@ -18,5 +18,8 @@ void b1_staging_plan_free(struct b1_staging_plan *plan);
 enum b1_restore_status b1_stage_image(const struct b1_restore_image *image,
 				      const char *image_dir,
 				      struct b1_staging_plan *plan);
+enum b1_restore_status b1_staging_copy(struct b1_staging_plan *plan,
+				       uint64_t staging_addr,
+				       const void *data, size_t length);
 
 #endif

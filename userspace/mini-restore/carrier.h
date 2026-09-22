@@ -2,6 +2,7 @@
 #define B1_CARRIER_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #include "restore.h"
@@ -22,6 +23,7 @@ enum b1_restore_status b1_carrier_manager_record(struct b1_carrier_manager *mana
 void b1_carrier_manager_cleanup(struct b1_carrier_manager *manager);
 enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *manager,
 						  pid_t target_pid,
+						  uint64_t tls,
 						  b1_carrier_entry_fn entry,
 						  void *arg,
 						  struct b1_restore_image *diag);

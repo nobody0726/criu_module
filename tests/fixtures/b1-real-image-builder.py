@@ -20,6 +20,7 @@ PSTREE_MAGIC = 0x50273030
 CORE_MAGIC = 0x55053847
 MM_MAGIC = 0x57492820
 PAGEMAP_MAGIC = 0x56084025
+FILES_MAGIC = 0x56303138
 
 
 def varint(value: int) -> bytes:
@@ -122,6 +123,21 @@ def build(out: Path, case: str) -> None:
     image(out / f"mm-{pid}.img", MM_MAGIC, [mm])
     image(out / f"pagemap-{pid}.img", PAGEMAP_MAGIC, [pagemap_head, pagemap_entry])
     (out / "pages-1.img").write_bytes(b"\0" * PAGE)
+
+    # Modern CRIU embeds reg_file_entry in files.img (the legacy standalone
+    # reg-files.img stream is no longer emitted by current dumps).
+    backing = out / "backing.bin"
+    backing.write_bytes(b"\0" * PAGE)
+    reg = (
+        field(1, 99)
+        + field(2, 0)
+        + field(3, 0)
+        + message_field(5, field(1, 0))
+        + message_field(6, str(backing).encode())
+        + field(8, 0)
+    )
+    files = field(1, 1) + field(2, 99) + message_field(3, reg)
+    image(out / "files.img", FILES_MAGIC, [files])
 
     if case == "real-wrong-arch":
         image(out / f"core-{pid}.img", CORE_MAGIC, [field(1, 1)])

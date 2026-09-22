@@ -2,7 +2,13 @@ CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c11
 CPPFLAGS += -I../../include
 
+ARCH := $(shell uname -m)
 OBJS := image_reader.o criu_wire.o criu_image_reader.o validator.o carrier.o files.o staging.o sigframe.o cleanup.o
+ifeq ($(shell uname -s),Linux)
+ifneq (,$(filter aarch64 arm64,$(ARCH)))
+OBJS += bootstrap.o
+endif
+endif
 
 all: libmini_restore.a mini-restore
 

@@ -50,6 +50,12 @@ void b1_restore_image_free(struct b1_restore_image *image)
 		return;
 	free(image->vmas);
 	free(image->page_runs);
+	if (image->reg_files) {
+		size_t i;
+		for (i = 0; i < image->reg_file_count; i++)
+			free(image->reg_files[i].name);
+		free(image->reg_files);
+	}
 	b1_restore_image_init(image);
 }
 

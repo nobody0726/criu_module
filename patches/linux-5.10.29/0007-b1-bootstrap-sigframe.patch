@@ -1,0 +1,20 @@
+--- a/kernel/criu_restore.c
++++ b/kernel/criu_restore.c
+@@ -128,11 +128,17 @@ static int criu_restore_validate_sigframe(const struct criu_restore_plan_v1 *plan,
+ {
+ 	if (!criu_restore_sp_in_staging_vmas(plan, vmas,
+-					     plan->sigframe_staging_sp))
++					     plan->sigframe_staging_sp) &&
++	    !criu_restore_in_half_open_range(plan->sigframe_staging_sp,
++					     plan->bootstrap_stack_start,
++					     plan->bootstrap_stack_end))
+ 		return -EINVAL;
+ 	if (!criu_restore_sp_in_target_vmas(plan, vmas,
+-					    plan->sigframe_final_sp))
++					    plan->sigframe_final_sp) &&
++	    !criu_restore_in_half_open_range(plan->sigframe_final_sp,
++					     plan->bootstrap_stack_start,
++					     plan->bootstrap_stack_end))
+ 		return -EINVAL;
+ 	return 0;
+ }

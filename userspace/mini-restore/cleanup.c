@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "cleanup.h"
 
 #include <signal.h>

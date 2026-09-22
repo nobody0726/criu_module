@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "carrier.h"
 
 #include <errno.h>
@@ -10,6 +12,9 @@
 #ifdef __linux__
 #include <linux/sched.h>
 #include <sys/syscall.h>
+#if defined(__GLIBC__)
+#include <sys/rseq.h>
+#endif
 #endif
 
 #ifndef SYS_clone3
@@ -19,6 +24,44 @@
 #endif
 
 #define B1_CARRIER_STACK_SIZE (1024U * 1024U)
+
+#if defined(__linux__) && defined(SYS_clone3)
+#if defined(__GLIBC__)
+struct b1_carrier_child {
+	b1_carrier_entry_fn entry;
+	void *arg;
+	void *rseq;
+	unsigned int rseq_size;
+};
+
+static void *b1_carrier_current_rseq(void)
+{
+	if (!__rseq_size)
+		return NULL;
+	return (void *)((char *)__builtin_thread_pointer() + __rseq_offset);
+}
+
+static void b1_carrier_unregister_inherited_rseq(
+		struct b1_carrier_child *child)
+{
+	if (!child->rseq || !child->rseq_size)
+		return;
+	(void)syscall(SYS_rseq, child->rseq, child->rseq_size,
+			      RSEQ_FLAG_UNREGISTER, RSEQ_SIG);
+}
+#else
+struct b1_carrier_child {
+	b1_carrier_entry_fn entry;
+	void *arg;
+};
+
+static void b1_carrier_unregister_inherited_rseq(
+		struct b1_carrier_child *child)
+{
+	(void)child;
+}
+#endif
+#endif
 
 void b1_carrier_manager_init(struct b1_carrier_manager *manager)
 {
@@ -108,17 +151,27 @@ static enum b1_restore_status clone_errno_status(int err,
 
 enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *manager,
 						  pid_t target_pid,
+						  uint64_t tls,
 						  b1_carrier_entry_fn entry,
 						  void *arg,
 						  struct b1_restore_image *diag)
 {
 #if defined(__linux__) && defined(SYS_clone3)
 	void *stack = NULL;
+	struct b1_carrier_child child = {
+		.entry = entry,
+		.arg = arg,
+#if defined(__GLIBC__)
+		.rseq = b1_carrier_current_rseq(),
+		.rseq_size = __rseq_size,
+#endif
+	};
 	struct clone_args args = {
-		.flags = 0,
+		.flags = CLONE_SETTLS,
 		.exit_signal = SIGCHLD,
 		.stack = 0,
 		.stack_size = 0,
+		.tls = tls,
 		.set_tid = (unsigned long)&target_pid,
 		.set_tid_size = 1,
 	};
@@ -144,7 +197,10 @@ enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *ma
 		return clone_errno_status(err, diag);
 	}
 	if (rc == 0) {
-		int child_rc = entry(arg);
+		int child_rc;
+
+		b1_carrier_unregister_inherited_rseq(&child);
+		child_rc = child.entry(child.arg);
 
 		_exit(child_rc < 0 ? 127 : child_rc);
 	}
@@ -159,6 +215,7 @@ enum b1_restore_status b1_create_exact_pid_carrier(struct b1_carrier_manager *ma
 #else
 	(void)manager;
 	(void)target_pid;
+	(void)tls;
 	(void)entry;
 	(void)arg;
 	b1_restore_set_diag(diag, B1_RESTORE_UNSUPPORTED,
