@@ -9,6 +9,7 @@ test -s "$PATCH"
 sh "$ROOT/tests/b1-kernel-patch-contract.sh"
 sh "$ROOT/tests/b1-validate-contract.sh"
 sh "$ROOT/tests/b1-vma-commit-contract.sh"
+sh "$ROOT/tests/b1-patch-integrity.sh"
 
 if [ -d "$KDIR" ]; then
 	patch --dry-run -d "$KDIR" -p1 < "$PATCH" >/dev/null

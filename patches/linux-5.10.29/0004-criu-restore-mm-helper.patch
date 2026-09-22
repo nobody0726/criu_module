@@ -149,7 +149,7 @@
 +}
 --- a/kernel/criu_restore.c
 +++ b/kernel/criu_restore.c
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,513 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Minimal CRIU restore transaction device for the criu_module B1 track.
